@@ -23,12 +23,10 @@ st.set_page_config(
 def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
     """Busca histórico de preços ajustados, garantindo o benchmark BOVA11.SA."""
     t_list = list(tickers)
-    # Garante BOVA11.SA para cálculo de beta/mercado
     if 'BOVA11.SA' not in t_list:
         t_list.append('BOVA11.SA')
     
     try:
-        # Usa auto_adjust=False para manter 'Adj Close' e evitar o FutureWarning
         data = yf.download(
             t_list, 
             start=start_date, 
@@ -165,39 +163,27 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     return df.sort_values('Composite_Score', ascending=False)
 
 # ==============================================================================
-# MÓDULO 4: PORTFOLIO & BACKTEST (COM CORREÇÃO DO VOL TARGET)
+# MÓDULO 4: PORTFOLIO & BACKTEST (NORMALIZAÇÃO FORÇADA)
 # ==============================================================================
 
 def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: int, vol_target: float = None):
-    """Define pesos do portfólio (Equal Weight ou Vol Targeting/Risco Inverso)."""
+    """Define pesos do portfólio (Equal Weight ou Risco Inverso, sempre somando 100%)."""
     selected = ranked_df.head(top_n).index.tolist()
     if not selected: return pd.Series()
 
     if vol_target is not None:
-        # Ponderação por Risco Inverso com Dimensionamento (Volatility Targeting)
+        # Ponderação por Risco Inverso (sem dimensionamento pelo alvo, mas com normalização)
         
+        # 1. Calcular volatilidade histórica (3 meses / 63 dias)
         recent_rets = prices[selected].pct_change().tail(63)
         vols = recent_rets.std() * (252**0.5)
         vols[vols == 0] = 1e-6 # Evita divisão por zero
         
-        # 1. Calcular Pesos de Risco Inverso (Proporção que soma 1.0)
+        # 2. Calcular Pesos de Risco Inverso
         raw_weights_inv = 1 / vols
-        weights_rp = raw_weights_inv / raw_weights_inv.sum() 
         
-        # 2. Calcular a Volatilidade Real da carteira de Risco Inverso (PV)
-        rets_rp = recent_rets.dot(weights_rp.fillna(0))
-        portfolio_vol = rets_rp.std() * (252**0.5)
-        
-        # 3. Fator de Dimensionamento
-        scaling_factor = vol_target / portfolio_vol
-        
-        # 4. Pesos Finais (Dimensionados pelo Vol Target)
-        weights = weights_rp * scaling_factor
-        
-        # 5. Limite Long-Only (Sem Alavancagem): Se a soma total for > 100%, 
-        # significa que o Vol Target é alto e estamos limitando a 100% de alocação.
-        if weights.sum() > 1.0:
-            weights = weights / weights.sum()
+        # 3. FORÇA A NORMALIZAÇÃO para 100% (Desliga o dimensionamento do Vol Target)
+        weights = raw_weights_inv / raw_weights_inv.sum() 
             
     else:
         # Pesos Iguais (Equal Weight)
@@ -214,7 +200,7 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     subset = prices.tail(lookback_days)
     rets = subset.pct_change().dropna()
     
-    # 1. Retorno do Portfólio (Usa os pesos dimensionados)
+    # 1. Retorno do Portfólio (Usa os pesos normalizados a 100%)
     port_ret = rets[valid_tickers].dot(weights[valid_tickers].fillna(0))
     
     # 2. Retorno do Benchmark
@@ -249,8 +235,12 @@ def main():
 
     st.sidebar.header("3. Construção de Portfólio (Risco)")
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
-    use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso (Vol Target)?", True)
-    target_vol = st.sidebar.slider("Volatilidade Alvo (Anual)", 0.05, 0.30, 0.15) if use_vol_target else None
+    
+    # O checkbox agora ativa a ponderação de Risco Inverso, mas a normalização é forçada
+    use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso?", True)
+    
+    # target_vol é mantido para manter a interface, mas não afeta a escala total
+    target_vol = st.sidebar.slider("Volatilidade Alvo (Apenas para referência)", 0.05, 0.30, 0.15) if use_vol_target else None
     
     run_btn = st.sidebar.button("🚀 Rodar Análise", type="primary")
 
@@ -336,12 +326,11 @@ def main():
                 st.subheader("Alocação Sugerida")
                 if not weights.empty:
                     w_df = weights.to_frame(name="Peso")
-                    total_sum = weights.sum() # Soma total
+                    total_sum = weights.sum()
                     
-                    # Exibe a soma total dos pesos para verificar o dimensionamento
+                    # A Soma Total deve ser sempre 100% agora
                     st.metric("Soma da Alocação", f"{total_sum:.2%}")
                     
-                    # Exibe a tabela de pesos
                     w_df["Peso"] = w_df["Peso"].map("{:.2%}".format)
                     st.table(w_df)
                     
@@ -350,7 +339,7 @@ def main():
 
         with tab2:
             st.subheader("Performance Recente (Simulação de 1 Ano)")
-            st.info("A Volatilidade Alvo controla a escala do Retorno Total e da Volatilidade Anual.")
+            st.info("A alocação está sempre em 100% (Risco Inverso Normalizado).")
             
             if not weights.empty:
                 curve = run_backtest(weights, prices)
@@ -364,7 +353,6 @@ def main():
                     vol = daily_rets['Strategy'].std() * (252**0.5)
                     ret_bench = curve['BOVA11.SA'].iloc[-1] - 1 if 'BOVA11.SA' in curve.columns else np.nan
                     
-                    # Assume Retorno Livre de Risco (RF) = 0 para simplificação
                     sharpe = tot_ret / vol if vol > 0 else 0
                     
                     m1, m2, m3, m4 = st.columns(4)
