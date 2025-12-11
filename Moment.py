@@ -261,7 +261,7 @@ def main():
 
     # --- SIDEBAR ---
     st.sidebar.header("1. Universo e Dados")
-    default_univ = "AAPL, MSFT, GOOGL, AMZN, NVDA, TSLA, META, JPM, V, JNJ, PG, XOM, UNH, HD, MA, PFE, KO, PEP, MRK, AVGO, CSCO, MCD, ABT"
+    default_univ = "itub3.sa, tots3.sa, mdia3.sa, taee3.sa, bbse3.sa, wege3.sa, pssa3.sa, egie3.sa, b3sa3.sa, vivt3.sa, agro3.sa, prio3.sa, bbas3.sa, bpac11.sa, sbsp3.sa, sapr4.sa, cmig3.sa, unip6.sa, fras3.sa"
     ticker_input = st.sidebar.text_area("Tickers (Separados por vírgula)", default_univ, height=100)
     tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
 
