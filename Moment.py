@@ -21,24 +21,22 @@ st.set_page_config(
 
 @st.cache_data(ttl=3600*12)
 def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
-    """Busca histórico de preços ajustados."""
-    # Garante BVSP para cálculo de beta/mercado
+    """Busca histórico de preços ajustados, garantindo o benchmark BOVA11.SA."""
     t_list = list(tickers)
+    # Garante BOVA11.SA para cálculo de beta/mercado
     if 'BOVA11.SA' not in t_list:
         t_list.append('BOVA11.SA')
     
     try:
-        # CORREÇÃO DO FUTURE WARNING: Definir auto_adjust=False para manter 
-        # a coluna 'Adj Close' e evitar o aviso.
+        # Usa auto_adjust=False para manter 'Adj Close' e evitar o FutureWarning
         data = yf.download(
             t_list, 
             start=start_date, 
             end=end_date, 
             progress=False,
-            auto_adjust=False  # Mantém o comportamento original
+            auto_adjust=False
         )['Adj Close']
         
-        # Correção para o MultiIndex se for o caso
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
             
@@ -53,16 +51,12 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     data = []
     clean_tickers = [t for t in tickers if t != 'BOVA11.SA']
     
-    # Barra de progresso para melhor UX
     progress_bar = st.progress(0)
     total = len(clean_tickers)
     
     for i, t in enumerate(clean_tickers):
         try:
-            stock = yf.Ticker(t)
-            info = stock.info
-            
-            # Coleta defensiva (se não existir, retorna NaN)
+            info = yf.Ticker(t).info
             data.append({
                 'ticker': t,
                 'sector': info.get('sector', 'Unknown'),
@@ -89,17 +83,12 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 # ==============================================================================
 
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
-    """
-    Calcula Momentum Residual (Retorno idiossincrático vs BVSP).
-    Metodologia: Regressão OLS de 12 meses. Score = Sum(Resíduos) / Std(Resíduos).
-    """
+    """Calcula Residual Momentum (Alpha) vs BOVA11.SA."""
     df = price_df.copy()
-    # Resample mensal
     monthly = df.resample('ME').last()
     rets = monthly.pct_change().dropna()
     
-    if 'BOVA11.SA' not in rets.columns:
-        return pd.Series(dtype=float)
+    if 'BOVA11.SA' not in rets.columns: return pd.Series(dtype=float)
         
     market = rets['BOVA11.SA']
     scores = {}
@@ -111,21 +100,19 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
         y = rets[ticker].tail(window)
         x = market.tail(window)
         
-        if len(y) < window:
-            continue
+        if len(y) < window: continue
             
-        # Regressão: Ri = alpha + beta*Rm + erro
-        X = sm.add_constant(x.values)
-        model = sm.OLS(y.values, X).fit()
-        
-        # Pega resíduos excluindo o mês mais recente (skip)
-        resid = model.resid[:-skip]
-        
-        # Score = Information Ratio dos resíduos
-        if np.std(resid) == 0 or len(resid) < 2:
+        try:
+            X = sm.add_constant(x.values)
+            model = sm.OLS(y.values, X).fit()
+            resid = model.resid[:-skip]
+            
+            if np.std(resid) == 0 or len(resid) < 2:
+                scores[ticker] = 0
+            else:
+                scores[ticker] = np.sum(resid) / np.std(resid)
+        except:
             scores[ticker] = 0
-        else:
-            scores[ticker] = np.sum(resid) / np.std(resid)
             
     return pd.Series(scores, name='Residual_Momentum')
 
@@ -133,34 +120,25 @@ def compute_fundamental_momentum(fund_df: pd.DataFrame) -> pd.Series:
     """Z-Score combinado de crescimento de Receita e Lucro."""
     metrics = ['earningsGrowth', 'revenueGrowth']
     temp_df = pd.DataFrame(index=fund_df.index)
-    
     for m in metrics:
         if m in fund_df.columns:
             s = fund_df[m].fillna(fund_df[m].median())
             temp_df[m] = (s - s.mean()) / s.std()
-            
     return temp_df.mean(axis=1).rename("Fundamental_Momentum")
 
 def compute_value_score(fund_df: pd.DataFrame) -> pd.Series:
     """Score de Valor: Inverso de P/E e P/B."""
     scores = pd.DataFrame(index=fund_df.index)
-    
-    if 'forwardPE' in fund_df:
-        scores['EP'] = np.where(fund_df['forwardPE'] > 0, 1/fund_df['forwardPE'], 0)
-        
-    if 'priceToBook' in fund_df:
-        scores['BP'] = np.where(fund_df['priceToBook'] > 0, 1/fund_df['priceToBook'], 0)
-        
+    if 'forwardPE' in fund_df: scores['EP'] = np.where(fund_df['forwardPE'] > 0, 1/fund_df['forwardPE'], 0)
+    if 'priceToBook' in fund_df: scores['BP'] = np.where(fund_df['priceToBook'] > 0, 1/fund_df['priceToBook'], 0)
     return scores.mean(axis=1).rename("Value_Score")
 
 def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
     """Score de Qualidade: ROE, Margem e Alavancagem."""
     scores = pd.DataFrame(index=fund_df.index)
-    
     if 'returnOnEquity' in fund_df: scores['ROE'] = fund_df['returnOnEquity']
     if 'profitMargins' in fund_df: scores['PM'] = fund_df['profitMargins']
     if 'debtToEquity' in fund_df: scores['DE_Inv'] = -1 * fund_df['debtToEquity']
-        
     return scores.mean(axis=1).rename("Quality_Score")
 
 # ==============================================================================
@@ -168,17 +146,11 @@ def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
 # ==============================================================================
 
 def robust_zscore(series: pd.Series) -> pd.Series:
-    """
-    Z-Score Robusto usando Mediana e MAD (Median Absolute Deviation).
-    Clipper em +/- 3 para remover outliers extremos.
-    """
+    """Z-Score Robusto."""
     series = series.replace([np.inf, -np.inf], np.nan)
     median = series.median()
     mad = (series - median).abs().median()
-    
-    if mad == 0:
-        return series - median
-    
+    if mad == 0: return series - median
     z = (series - median) / (mad * 1.4826)
     return z.clip(-3, 3)
 
@@ -186,7 +158,6 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     """Calcula score final ponderado."""
     df = df_master.copy()
     df['Composite_Score'] = 0.0
-    
     for factor_col, weight in weights.items():
         if factor_col in df.columns:
             df['Composite_Score'] += df[factor_col].fillna(0) * weight
@@ -194,62 +165,67 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     return df.sort_values('Composite_Score', ascending=False)
 
 # ==============================================================================
-# MÓDULO 4: PORTFOLIO & BACKTEST
+# MÓDULO 4: PORTFOLIO & BACKTEST (COM CORREÇÃO DO VOL TARGET)
 # ==============================================================================
 
 def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: int, vol_target: float = None):
-    """Define pesos do portfólio (Equal Weight ou Vol Target)."""
+    """Define pesos do portfólio (Equal Weight ou Vol Targeting/Risco Inverso)."""
     selected = ranked_df.head(top_n).index.tolist()
-    
-    if not selected:
-        return pd.Series()
+    if not selected: return pd.Series()
 
     if vol_target is not None:
-        # Volatilidade recente (3 meses)
+        # Ponderação por Risco Inverso com Dimensionamento (Volatility Targeting)
+        
         recent_rets = prices[selected].pct_change().tail(63)
         vols = recent_rets.std() * (252**0.5)
+        vols[vols == 0] = 1e-6 # Evita divisão por zero
         
-        # Ajuste para ativos com volatilidade zero ou nula
-        vols[vols == 0] = 1 # Evita divisão por zero
+        # 1. Calcular Pesos de Risco Inverso (Proporção que soma 1.0)
+        raw_weights_inv = 1 / vols
+        weights_rp = raw_weights_inv / raw_weights_inv.sum() 
         
-        # Peso inverso à volatilidade: w = (Target / Vol)
-        raw_weights = vol_target / vols
-        weights = raw_weights / raw_weights.sum()
+        # 2. Calcular a Volatilidade Real da carteira de Risco Inverso (PV)
+        rets_rp = recent_rets.dot(weights_rp.fillna(0))
+        portfolio_vol = rets_rp.std() * (252**0.5)
+        
+        # 3. Fator de Dimensionamento
+        scaling_factor = vol_target / portfolio_vol
+        
+        # 4. Pesos Finais (Dimensionados pelo Vol Target)
+        weights = weights_rp * scaling_factor
+        
+        # 5. Limite Long-Only (Sem Alavancagem): Se a soma total for > 100%, 
+        # significa que o Vol Target é alto e estamos limitando a 100% de alocação.
+        if weights.sum() > 1.0:
+            weights = weights / weights.sum()
+            
     else:
-        # Pesos iguais
+        # Pesos Iguais (Equal Weight)
         weights = pd.Series(1.0/len(selected), index=selected)
         
     return weights
 
 def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 252):
-    """
-    Simula o desempenho do portfólio selecionado no período recente.
-    """
+    """Simula o desempenho do portfólio selecionado."""
     valid_tickers = [t for t in weights.index if t in prices.columns]
-    if not valid_tickers:
-        return pd.DataFrame()
+    if not valid_tickers: return pd.DataFrame()
         
     # Recorta o período
-    subset = prices[valid_tickers].tail(lookback_days)
+    subset = prices.tail(lookback_days)
     rets = subset.pct_change().dropna()
     
-    # Retorno do portfólio
-    port_ret = rets.dot(weights[valid_tickers])
+    # 1. Retorno do Portfólio (Usa os pesos dimensionados)
+    port_ret = rets[valid_tickers].dot(weights[valid_tickers].fillna(0))
     
-    # Cumulative Return (Equity Curve)
-    cumulative = (1 + port_ret).cumprod()
-    cumulative.name = "Strategy"
+    # 2. Retorno do Benchmark
+    BVSP_ret = rets['BOVA11.SA'] if 'BOVA11.SA' in rets.columns else pd.Series(0, index=rets.index)
     
-    # Benchmark (BVSP) se disponível
-    if 'BOVA11.SA' in prices.columns:
-        BVSP_ret = prices['BOVA11.SA'].tail(lookback_days).pct_change().dropna()
-        BVSP_cum = (1 + BVSP_ret).cumprod()
-        
-        # Alinha datas
-        combined = pd.DataFrame({'Strategy': cumulative, 'BOVA11.SA': BVSP_cum}).ffill().dropna()
-        return combined
+    # Cria DataFrame de retornos diários
+    daily_rets = pd.DataFrame({'Strategy': port_ret, 'BOVA11.SA': BVSP_ret})
     
-    return cumulative.to_frame()
+    # Retorno Cumulativo (Começa em 1.0)
+    cumulative = (1 + daily_rets).cumprod()
+    return cumulative.dropna()
 
 # ==============================================================================
 # APP PRINCIPAL (STREAMLIT UI)
@@ -257,23 +233,23 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
 
 def main():
     st.title("🧪 Quant Factor Lab: Multi-Strategy Engine")
-    st.markdown("---")
+    st.markdown("Otimização de carteira Long-Only baseada em fatores e risco.")
 
     # --- SIDEBAR ---
-    st.sidebar.header("1. Universo e Dados")
-    default_univ = "itub3.sa, tots3.sa, mdia3.sa, taee3.sa, bbse3.sa, wege3.sa, pssa3.sa, egie3.sa, b3sa3.sa, vivt3.sa, agro3.sa, prio3.sa, bbas3.sa, bpac11.sa, sbsp3.sa, sapr4.sa, cmig3.sa, unip6.sa, fras3.sa"
+    st.sidebar.header("1. Universo e Dados (BOVESPA)")
+    default_univ = "ITUB3.SA, TOTS3.SA, MDIA3.SA, TAEE3.SA, BBSE3.SA, WEGE3.SA, PSSA3.SA, EGIE3.SA, B3SA3.SA, VIVT3.SA, AGRO3.SA, PRIO3.SA, BBAS3.SA, BPAC11.SA, SBSP3.SA, SAPR4.SA, CMIG3.SA, UNIP6.SA, FRAS3.SA"
     ticker_input = st.sidebar.text_area("Tickers (Separados por vírgula)", default_univ, height=100)
     tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
 
-    st.sidebar.header("2. Pesos dos Fatores")
+    st.sidebar.header("2. Pesos dos Fatores (Alpha)")
     w_rm = st.sidebar.slider("Residual Momentum", 0.0, 1.0, 0.40)
     w_fm = st.sidebar.slider("Fundamental Momentum", 0.0, 1.0, 0.20)
     w_val = st.sidebar.slider("Value", 0.0, 1.0, 0.20)
     w_qual = st.sidebar.slider("Quality", 0.0, 1.0, 0.20)
 
-    st.sidebar.header("3. Construção de Portfólio")
+    st.sidebar.header("3. Construção de Portfólio (Risco)")
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
-    use_vol_target = st.sidebar.checkbox("Usar Volatility Targeting?", False)
+    use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso (Vol Target)?", True)
     target_vol = st.sidebar.slider("Volatilidade Alvo (Anual)", 0.05, 0.30, 0.15) if use_vol_target else None
     
     run_btn = st.sidebar.button("🚀 Rodar Análise", type="primary")
@@ -329,13 +305,15 @@ def main():
                     norm_cols.append(new_col)
             
             weights_dict = {
-                'Res_Mom_Z': w_rm,
-                'Fund_Mom_Z': w_fm,
-                'Value_Z': w_val,
-                'Quality_Z': w_qual
+                'Res_Mom_Z': w_rm, 'Fund_Mom_Z': w_fm, 
+                'Value_Z': w_val, 'Quality_Z': w_qual
             }
             
             final_df = build_composite_score(df_master, weights_dict)
+            
+            st.write("⚖️ Calculando alocação e backtest...")
+            weights = construct_portfolio(final_df, prices, top_n, target_vol)
+
             status.update(label="Concluído!", state="complete", expanded=False)
 
         # --- OUTPUTS ---
@@ -346,50 +324,65 @@ def main():
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.subheader("Top Picks")
+                st.subheader("Top Picks (Selecionados pelo Score)")
                 show_cols = ['Composite_Score', 'Sector'] + norm_cols
                 st.dataframe(
-                    final_df[show_cols].style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
+                    final_df[show_cols].head(top_n).style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
                     height=400,
-                    use_container_width=True
+                    width='stretch'
                 )
             
             with col2:
                 st.subheader("Alocação Sugerida")
-                weights = construct_portfolio(final_df, prices, top_n, target_vol)
-                
                 if not weights.empty:
                     w_df = weights.to_frame(name="Peso")
-                    w_df["Peso"] = w_df["Peso"].map("{:.1%}".format)
+                    total_sum = weights.sum() # Soma total
+                    
+                    # Exibe a soma total dos pesos para verificar o dimensionamento
+                    st.metric("Soma da Alocação", f"{total_sum:.2%}")
+                    
+                    # Exibe a tabela de pesos
+                    w_df["Peso"] = w_df["Peso"].map("{:.2%}".format)
                     st.table(w_df)
                     
                     fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
         with tab2:
-            st.subheader("Performance Recente (Simulação)")
-            st.info("Nota: Este backtest simula como a carteira SELECIONADA HOJE teria performado nos últimos 12 meses (In-Sample Analysis).")
+            st.subheader("Performance Recente (Simulação de 1 Ano)")
+            st.info("A Volatilidade Alvo controla a escala do Retorno Total e da Volatilidade Anual.")
             
             if not weights.empty:
                 curve = run_backtest(weights, prices)
                 
-                if not curve.empty:
+                if not curve.empty and len(curve) > 1:
+                    # Cálculo de Métricas
+                    daily_rets = curve.pct_change().dropna()
+                    
+                    # Cálculo das métricas anuais
                     tot_ret = curve['Strategy'].iloc[-1] - 1
-                    vol = curve['Strategy'].pct_change().std() * (252**0.5)
+                    vol = daily_rets['Strategy'].std() * (252**0.5)
+                    ret_bench = curve['BOVA11.SA'].iloc[-1] - 1 if 'BOVA11.SA' in curve.columns else np.nan
+                    
+                    # Assume Retorno Livre de Risco (RF) = 0 para simplificação
                     sharpe = tot_ret / vol if vol > 0 else 0
                     
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Retorno Total", f"{tot_ret:.2%}")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Retorno Total (Estratégia)", f"{tot_ret:.2%}")
                     m2.metric("Volatilidade Anual", f"{vol:.2%}")
-                    m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                    m3.metric("Sharpe Ratio (Anual)", f"{sharpe:.2f}")
+                    if not np.isnan(ret_bench):
+                         m4.metric("Retorno Benchmark (BOVA11.SA)", f"{ret_bench:.2%}")
                     
-                    fig = px.line(curve, title="Equity Curve: Estratégia vs BVSP")
+                    fig = px.line(curve, title="Equity Curve: Estratégia vs BOVA11.SA")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning("Dados de preço insuficientes para gerar o gráfico.")
+                    st.warning("Dados insuficientes para calcular o backtest no período.")
+            else:
+                st.warning("Nenhum ativo selecionado.")
 
         with tab3:
-            st.subheader("Correlação entre Fatores")
+            st.subheader("Correlação entre Fatores (Normalizados)")
             if norm_cols:
                 corr = final_df[norm_cols].corr()
                 fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', title="Mapa de Calor de Correlação")
