@@ -24,8 +24,8 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
     """Busca histórico de preços ajustados."""
     # Garante BVSP para cálculo de beta/mercado
     t_list = list(tickers)
-    if 'BOVA.SA' not in t_list:
-        t_list.append('BOVA.SA')
+    if 'BOVA11.SA' not in t_list:
+        t_list.append('BOVA11.SA')
     
     try:
         # CORREÇÃO DO FUTURE WARNING: Definir auto_adjust=False para manter 
@@ -51,7 +51,7 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
 def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     """Busca snapshots fundamentais atuais."""
     data = []
-    clean_tickers = [t for t in tickers if t != 'BOVA.SA']
+    clean_tickers = [t for t in tickers if t != 'BOVA11.SA']
     
     # Barra de progresso para melhor UX
     progress_bar = st.progress(0)
@@ -98,15 +98,15 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
     monthly = df.resample('ME').last()
     rets = monthly.pct_change().dropna()
     
-    if 'BOVA.SA' not in rets.columns:
+    if 'BOVA11.SA' not in rets.columns:
         return pd.Series(dtype=float)
         
-    market = rets['BOVA.SA']
+    market = rets['BOVA11.SA']
     scores = {}
     window = lookback + skip
     
     for ticker in rets.columns:
-        if ticker == 'BOVA.SA': continue
+        if ticker == 'BOVA11.SA': continue
         
         y = rets[ticker].tail(window)
         x = market.tail(window)
@@ -241,12 +241,12 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     cumulative.name = "Strategy"
     
     # Benchmark (BVSP) se disponível
-    if 'BOVA.SA' in prices.columns:
-        BVSP_ret = prices['BOVA.SA'].tail(lookback_days).pct_change().dropna()
+    if 'BOVA11.SA' in prices.columns:
+        BVSP_ret = prices['BOVA11.SA'].tail(lookback_days).pct_change().dropna()
         BVSP_cum = (1 + BVSP_ret).cumprod()
         
         # Alinha datas
-        combined = pd.DataFrame({'Strategy': cumulative, 'BOVA.SA': BVSP_cum}).ffill().dropna()
+        combined = pd.DataFrame({'Strategy': cumulative, 'BOVA11.SA': BVSP_cum}).ffill().dropna()
         return combined
     
     return cumulative.to_frame()
