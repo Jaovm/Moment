@@ -243,7 +243,7 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     # Benchmark (BVSP) se disponível
     if '^BVSP' in prices.columns:
         BVSP_ret = prices['^BVSP'].tail(lookback_days).pct_change().dropna()
-        BVSP_cum = (1 + ^BVSP_ret).cumprod()
+        BVSP_cum = (1 + BVSP_ret).cumprod()
         
         # Alinha datas
         combined = pd.DataFrame({'Strategy': cumulative, '^BVSP': BVSP_cum}).ffill().dropna()
