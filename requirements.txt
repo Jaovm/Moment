@@ -5,3 +5,5 @@ yfinance
 statsmodels
 plotly
 scipy
+pytest
+matplotlib  # <<-- Adicionado
