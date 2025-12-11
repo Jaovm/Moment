@@ -22,10 +22,10 @@ st.set_page_config(
 @st.cache_data(ttl=3600*12)
 def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
     """Busca histórico de preços ajustados."""
-    # Garante BOVA.SA para cálculo de beta/mercado
+    # Garante IBOV11.SA para cálculo de beta/mercado
     t_list = list(tickers)
-    if 'BOVA.SA' not in t_list:
-        t_list.append('BOVA.SA')
+    if 'IBOV11.SA' not in t_list:
+        t_list.append('IBOV11.SA')
     
     try:
         # CORREÇÃO DO FUTURE WARNING: Definir auto_adjust=False para manter 
@@ -51,7 +51,7 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
 def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     """Busca snapshots fundamentais atuais."""
     data = []
-    clean_tickers = [t for t in tickers if t != 'BOVA.SA']
+    clean_tickers = [t for t in tickers if t != 'IBOV11.SA']
     
     # Barra de progresso para melhor UX
     progress_bar = st.progress(0)
@@ -90,7 +90,7 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
     """
-    Calcula Momentum Residual (Retorno idiossincrático vs BOVA.SA).
+    Calcula Momentum Residual (Retorno idiossincrático vs IBOV11.SA).
     Metodologia: Regressão OLS de 12 meses. Score = Sum(Resíduos) / Std(Resíduos).
     """
     df = price_df.copy()
@@ -98,15 +98,15 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
     monthly = df.resample('ME').last()
     rets = monthly.pct_change().dropna()
     
-    if 'BOVA.SA' not in rets.columns:
+    if 'IBOV11.SA' not in rets.columns:
         return pd.Series(dtype=float)
         
-    market = rets['BOVA.SA']
+    market = rets['IBOV11.SA']
     scores = {}
     window = lookback + skip
     
     for ticker in rets.columns:
-        if ticker == 'BOVA.SA': continue
+        if ticker == 'IBOV11.SA': continue
         
         y = rets[ticker].tail(window)
         x = market.tail(window)
@@ -240,13 +240,13 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     cumulative = (1 + port_ret).cumprod()
     cumulative.name = "Strategy"
     
-    # Benchmark (BOVA.SA) se disponível
-    if 'BOVA.SA' in prices.columns:
-        BOVA.SA_ret = prices['BOVA.SA'].tail(lookback_days).pct_change().dropna()
-        BOVA.SA_cum = (1 + BOVA.SA_ret).cumprod()
+    # Benchmark (IBOV11.SA) se disponível
+    if 'IBOV11.SA' in prices.columns:
+        IBOV11.SA_ret = prices['IBOV11.SA'].tail(lookback_days).pct_change().dropna()
+        IBOV11.SA_cum = (1 + IBOV11.SA_ret).cumprod()
         
         # Alinha datas
-        combined = pd.DataFrame({'Strategy': cumulative, 'BOVA.SA': BOVA.SA_cum}).ffill().dropna()
+        combined = pd.DataFrame({'Strategy': cumulative, 'IBOV11.SA': IBOV11.SA_cum}).ffill().dropna()
         return combined
     
     return cumulative.to_frame()
@@ -383,7 +383,7 @@ def main():
                     m2.metric("Volatilidade Anual", f"{vol:.2%}")
                     m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
                     
-                    fig = px.line(curve, title="Equity Curve: Estratégia vs BOVA.SA")
+                    fig = px.line(curve, title="Equity Curve: Estratégia vs IBOV11.SA")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Dados de preço insuficientes para gerar o gráfico.")
