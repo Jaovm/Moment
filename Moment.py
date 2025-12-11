@@ -22,7 +22,7 @@ st.set_page_config(
 @st.cache_data(ttl=3600*12)
 def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
     """Busca histórico de preços ajustados."""
-    # Garante ^BVSP para cálculo de beta/mercado
+    # Garante BVSP para cálculo de beta/mercado
     t_list = list(tickers)
     if '^BVSP' not in t_list:
         t_list.append('^BVSP')
@@ -90,7 +90,7 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
     """
-    Calcula Momentum Residual (Retorno idiossincrático vs ^BVSP).
+    Calcula Momentum Residual (Retorno idiossincrático vs BVSP).
     Metodologia: Regressão OLS de 12 meses. Score = Sum(Resíduos) / Std(Resíduos).
     """
     df = price_df.copy()
@@ -240,13 +240,13 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     cumulative = (1 + port_ret).cumprod()
     cumulative.name = "Strategy"
     
-    # Benchmark (^BVSP) se disponível
+    # Benchmark (BVSP) se disponível
     if '^BVSP' in prices.columns:
-        ^BVSP_ret = prices['^BVSP'].tail(lookback_days).pct_change().dropna()
-        ^BVSP_cum = (1 + ^BVSP_ret).cumprod()
+        BVSP_ret = prices['^BVSP'].tail(lookback_days).pct_change().dropna()
+        BVSP_cum = (1 + ^BVSP_ret).cumprod()
         
         # Alinha datas
-        combined = pd.DataFrame({'Strategy': cumulative, '^BVSP': ^BVSP_cum}).ffill().dropna()
+        combined = pd.DataFrame({'Strategy': cumulative, '^BVSP': BVSP_cum}).ffill().dropna()
         return combined
     
     return cumulative.to_frame()
@@ -383,7 +383,7 @@ def main():
                     m2.metric("Volatilidade Anual", f"{vol:.2%}")
                     m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
                     
-                    fig = px.line(curve, title="Equity Curve: Estratégia vs ^BVSP")
+                    fig = px.line(curve, title="Equity Curve: Estratégia vs BVSP")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Dados de preço insuficientes para gerar o gráfico.")
