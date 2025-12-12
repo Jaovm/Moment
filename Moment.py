@@ -5,6 +5,7 @@ import yfinance as yf
 import statsmodels.api as sm
 import plotly.express as px
 from datetime import datetime, timedelta
+import calendar
 
 # ==============================================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -174,15 +175,13 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
     if vol_target is not None:
         # Ponderação por Risco Inverso (Normalizada para 100%)
         
-        # 1. Calcular volatilidade histórica (3 meses / 63 dias)
         recent_rets = prices[selected].pct_change().tail(63)
         vols = recent_rets.std() * (252**0.5)
-        vols[vols == 0] = 1e-6 # Evita divisão por zero
+        vols[vols == 0] = 1e-6 
         
-        # 2. Calcular Pesos de Risco Inverso
         raw_weights_inv = 1 / vols
         
-        # 3. FORÇA A NORMALIZAÇÃO para 100% (Desliga o dimensionamento absoluto do Vol Target)
+        # FORÇA A NORMALIZAÇÃO para 100% 
         weights = raw_weights_inv / raw_weights_inv.sum() 
             
     else:
@@ -193,21 +192,17 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
 
 def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 252):
     """
-    Simula o desempenho do portfólio selecionado e do Benchmark.
+    Simula o desempenho do portfólio selecionado e do Benchmark (aporte inicial).
     Retorna a Curva de Equity.
     """
-    
-    # 1. Preparação dos Dados
     subset = prices.tail(lookback_days)
     rets = subset.pct_change().dropna()
     
-    # 2. Retorno do Benchmark
     if 'BOVA11.SA' in rets.columns:
         BVSP_ret = rets['BOVA11.SA']
     else:
         BVSP_ret = pd.Series(0, index=rets.index)
     
-    # 3. Retorno do Portfólio (Apenas se houver ativos válidos)
     valid_tickers = [t for t in weights.index if t in prices.columns]
     
     if valid_tickers:
@@ -215,12 +210,185 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     else:
         port_ret = pd.Series(0, index=rets.index)
         
-    # 4. Cria DataFrame de retornos diários
     daily_rets = pd.DataFrame({'Strategy': port_ret, 'BOVA11.SA': BVSP_ret})
-    
-    # 5. Retorno Cumulativo (Curva de Equity)
     cumulative = (1 + daily_rets).cumprod()
     return cumulative.dropna()
+
+def run_dca_backtest(weights: pd.Series, prices: pd.DataFrame, monthly_contribution: float = 1000, lookback_days: int = 252):
+    """
+    Simula um Backtest com Aportes Mensais (DCA) nos últimos 252 dias úteis,
+    usando pesos estáticos e aportando no último dia útil do mês.
+    """
+    valid_tickers = [t for t in weights.index if t in prices.columns]
+    if not valid_tickers or 'BOVA11.SA' not in prices.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # 1. Definir o período de análise (últimos 252 dias úteis)
+    if len(prices) < lookback_days:
+        st.warning(f"Dados insuficientes. Usando {len(prices)} dias.")
+        subset_prices = prices
+    else:
+        subset_prices = prices.tail(lookback_days)
+        
+    end_date = subset_prices.index[-1]
+    start_date = subset_prices.index[0]
+
+    # 2. Definir as datas de rebalanceamento (último dia útil do mês no período)
+    # Gera datas de fim de mês no período, e filtra para garantir que são dias de negociação
+    monthly_dates_approx = pd.date_range(start=start_date, end=end_date, freq='BM')
+    
+    # Mapeia a data de rebalanceamento para o último dia útil de negociação conhecido
+    dates = []
+    
+    for date in monthly_dates_approx:
+        # Encontra o último dia útil de negociação <= à data de fim de mês
+        valid_dates = subset_prices.index[subset_prices.index <= date]
+        if not valid_dates.empty:
+            last_trading_day = valid_dates.max()
+            if last_trading_day not in dates: # Evita duplicatas se BM for dia de negociação
+                dates.append(last_trading_day)
+
+    # Se a última data não for o fim do período (hoje), adiciona o dia final para valorização
+    if dates and dates[-1] < end_date:
+        dates.append(end_date)
+    elif not dates and len(subset_prices) > 0: # Caso extremo, usa o início e fim
+        dates = [start_date, end_date]
+        
+    # As datas de aporte/rebalanceamento serão todos os elementos de 'dates', exceto o último (que é só a valorização final)
+    
+    
+    # 3. Inicializar variáveis
+    capital_strategy = pd.Series(0.0, index=subset_prices.index)
+    capital_benchmark = pd.Series(0.0, index=subset_prices.index)
+    
+    # Histórico de transações para a tabela
+    transactions_history = []
+    
+    last_idx = subset_prices.index[0]
+
+    # Loop principal de DCA
+    for i in range(len(dates)):
+        rebal_date = dates[i]
+        
+        # A. Valorização do Capital (se houver período anterior)
+        if i > 0:
+            # Ponto de partida para a valorização é o valor após o aporte anterior
+            start_value_strat = capital_strategy.loc[last_idx]
+            start_value_bench = capital_benchmark.loc[last_idx]
+            
+            # Cálculo da valorização (multiplica o valor após o aporte pelos retornos)
+            rets_period = subset_prices.loc[last_idx:rebal_date].pct_change().dropna()
+            
+            # Valorização da Estratégia
+            if not rets_period.empty:
+                # Usa os retornos do período ponderados pelos pesos estáticos
+                valorization_factor_strat = (1 + rets_period.dot(weights[valid_tickers].fillna(0))).prod()
+                capital_strategy.loc[rebal_date] = start_value_strat * valorization_factor_strat
+            else:
+                 capital_strategy.loc[rebal_date] = start_value_strat
+
+            # Valorização do Benchmark
+            if 'BOVA11.SA' in rets_period.columns:
+                valorization_factor_bench = (1 + rets_period['BOVA11.SA']).prod()
+                capital_benchmark.loc[rebal_date] = start_value_bench * valorization_factor_bench
+            else:
+                capital_benchmark.loc[rebal_date] = start_value_bench
+                
+            last_idx = rebal_date # O novo ponto de partida
+            
+        # B. Aplicar o novo Aporte (se não for o ponto final)
+        if rebal_date < end_date:
+            buy_date = rebal_date # Aporte é feito no último dia útil do mês
+            prices_on_buy = subset_prices.loc[buy_date]
+            
+            # Estratégia: Aporte de 1000
+            investment_strategy = monthly_contribution
+            
+            for ticker in valid_tickers:
+                amount_to_buy = investment_strategy * weights[ticker]
+                
+                # Compra e adiciona ao capital total
+                if prices_on_buy[ticker] > 0:
+                    shares = amount_to_buy / prices_on_buy[ticker]
+                    capital_strategy.loc[buy_date] += shares * prices_on_buy[ticker]
+                else:
+                     shares = 0
+                
+                transactions_history.append({
+                    'Mês/Data Aporte': buy_date.strftime('%Y-%m-%d'),
+                    'Ticker': ticker,
+                    'Aporte (R$)': f"{amount_to_buy:.2f}",
+                    'Preço': f"{prices_on_buy[ticker]:.2f}",
+                    'Ações Compradas': f"{shares:.2f}"
+                })
+            
+            # Benchmark: Aporte de 1000 totalmente em BOVA11.SA
+            shares_bench = monthly_contribution / prices_on_buy['BOVA11.SA']
+            capital_benchmark.loc[buy_date] += shares_bench * prices_on_buy['BOVA11.SA']
+            
+            transactions_history.append({
+                'Mês/Data Aporte': buy_date.strftime('%Y-%m-%d'),
+                'Ticker': 'BOVA11.SA (Benchmark)',
+                'Aporte (R$)': f"{monthly_contribution:.2f}",
+                'Preço': f"{prices_on_buy['BOVA11.SA']:.2f}",
+                'Ações Compradas': f"{shares_bench:.2f}"
+            })
+            
+            last_idx = buy_date
+        
+        # C. Caso do primeiro ponto (i=0): Define o ponto inicial
+        if i == 0:
+            last_idx = rebal_date # Ponto de partida
+            
+    # 4. Combinar resultados
+    curve = pd.DataFrame({
+        'Strategy': capital_strategy[capital_strategy > 0].cumsum().ffill().dropna(),
+        'BOVA11.SA': capital_benchmark[capital_benchmark > 0].cumsum().ffill().dropna()
+    })
+    
+    # Ajustar a curva para usar a valorização contínua (substituir cumsum)
+    # A lógica de valorização no loop já cuida da acumulação correta.
+    # Vamos re-ajustar 'capital_strategy' e 'capital_benchmark' para uma série temporal única:
+    
+    # Criar uma série de valorização que preenche os dias entre os aportes/rebal.
+    all_dates = subset_prices.index
+    
+    final_curve = pd.DataFrame(index=all_dates)
+    final_curve['Strategy'] = 0.0
+    final_curve['BOVA11.SA'] = 0.0
+
+    current_capital_strat = 0.0
+    current_capital_bench = 0.0
+    
+    all_dca_points = sorted(list(set([t['Mês/Data Aporte'] for t in transactions_history])))
+
+    for k in range(len(all_dates)):
+        day = all_dates[k]
+        
+        # 1. Aplicar aporte/rebalanceamento se for dia de compra
+        if day.strftime('%Y-%m-%d') in all_dca_points:
+            # Adiciona o valor aportado (aprox. 1000)
+            current_capital_strat += monthly_contribution 
+            current_capital_bench += monthly_contribution
+            
+        # 2. Aplicar retornos do dia anterior
+        if k > 0:
+            prev_day = all_dates[k-1]
+            rets_day = subset_prices.loc[day].pct_change()
+            
+            # Retorno Estratégia
+            ret_strat = rets_day[valid_tickers].dot(weights[valid_tickers].fillna(0))
+            current_capital_strat *= (1 + ret_strat)
+            
+            # Retorno Benchmark
+            ret_bench = rets_day['BOVA11.SA']
+            current_capital_bench *= (1 + ret_bench)
+
+        final_curve.loc[day, 'Strategy'] = current_capital_strat
+        final_curve.loc[day, 'BOVA11.SA'] = current_capital_bench
+
+    return final_curve.replace([np.inf, -np.inf], np.nan).dropna(how='all').ffill().dropna(), pd.DataFrame(transactions_history)
+
 
 # ==============================================================================
 # APP PRINCIPAL (STREAMLIT UI)
@@ -229,7 +397,6 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
 def main():
     st.title("🧪 Quant Factor Lab: Multi-Strategy Engine")
     st.markdown("Otimização de carteira Long-Only baseada em fatores e risco.")
-    
 
     # --- SIDEBAR ---
     st.sidebar.header("1. Universo e Dados (BOVESPA)")
@@ -247,7 +414,6 @@ def main():
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
     
     use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso?", True)
-    # O target_vol é mantido apenas como entrada, mas não afeta a escala total do peso
     target_vol = st.sidebar.slider("Volatilidade Alvo (Apenas para referência)", 0.05, 0.30, 0.15) if use_vol_target else None
     
     run_btn = st.sidebar.button("🚀 Rodar Análise", type="primary")
@@ -261,9 +427,12 @@ def main():
         with st.status("Executando Pipeline Quant...", expanded=True) as status:
             
             # 1. Dados
+            st.write("📥 Baixando dados de mercado e fundamentais...")
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=730)
-            prices = fetch_price_data(tickers, start_date, end_date)
+            # Precisamos de dados suficientes para 252 dias e o cálculo de 2 anos (para o fator Residual Momentum)
+            start_date_main = end_date - timedelta(days=730)
+            
+            prices = fetch_price_data(tickers, start_date_main, end_date)
             fundamentals = fetch_fundamentals(tickers)
             
             if prices.empty or fundamentals.empty:
@@ -271,7 +440,8 @@ def main():
                 status.update(label="Erro!", state="error")
                 return
 
-            # 2. Cálculos e Ranking
+            # 2. Cálculos e Ranking (Usa os preços completos)
+            st.write("🧮 Calculando fatores e alocação estática...")
             res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals)
             val_score = compute_value_score(fundamentals)
@@ -306,9 +476,10 @@ def main():
 
         # --- OUTPUTS ---
         
-        tab1, tab2, tab3 = st.tabs(["🏆 Ranking & Seleção", "📈 Backtest (In-Sample)", "🔍 Detalhes dos Fatores"])
+        tab1, tab2, tab_dca, tab3 = st.tabs(["🏆 Ranking & Seleção", "📈 Backtest (Aporte Único)", "💰 Aportes Mensais DCA", "🔍 Detalhes dos Fatores"])
         
         with tab1:
+            # ... (código da tab 1) ...
             col1, col2 = st.columns([2, 1])
             
             with col1:
@@ -334,17 +505,17 @@ def main():
                     fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
+
         with tab2:
-            st.subheader("Performance Recente (Simulação de 1 Ano)")
+            # ... (código da tab 2) ...
+            st.subheader("Performance Recente (Simulação de 1 Ano - Aporte Único)")
+            st.info("Simula o desempenho de um aporte inicial na Estratégia vs. Benchmark.")
             
             if not weights.empty:
                 curve = run_backtest(weights, prices)
                 
                 if not curve.empty and len(curve) > 1:
                     
-                    # CÁLCULO DAS MÉTRICAS
-                    
-                    # Retornos Diários
                     daily_rets = curve.pct_change().dropna()
                     
                     # Estratégia
@@ -358,8 +529,6 @@ def main():
                     sharpe_bench = tot_ret_bench / vol_bench if vol_bench > 0 else 0
                     
                     
-                    # EXIBIÇÃO DAS MÉTRICAS
-                    
                     st.markdown("### 🏆 Comparação de Métricas")
                     col_met1, col_met2, col_met3 = st.columns(3)
                     
@@ -369,14 +538,54 @@ def main():
                     
                     st.markdown("---")
                     
-                    fig = px.line(curve, title="Equity Curve: Estratégia vs BOVA11.SA")
+                    fig = px.line(curve, title="Curva de Equity: Estratégia vs BOVA11.SA")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Dados insuficientes para calcular o backtest no período.")
             else:
                 st.warning("Nenhum ativo selecionado.")
 
+
+        with tab_dca:
+            st.subheader("💰 Simulação de Aportes Mensais (R$ 1000/mês)")
+            st.info(f"Simulação nos **últimos 252 dias úteis**. Aporte ocorre no **último dia útil do mês** usando a alocação de hoje.")
+            
+            if not weights.empty:
+                dca_curve, transactions = run_dca_backtest(weights, prices, lookback_days=252)
+                
+                if not dca_curve.empty:
+                    
+                    # O número de aportes é o número de meses no período (normalmente 12)
+                    num_aportes = len(transactions['Mês/Data Aporte'].unique()) - 1 # Subtrai o benchmark
+                    total_aportado = num_aportes * 1000
+                    
+                    # Valor final da Estratégia
+                    final_value_strat = dca_curve['Strategy'].iloc[-1]
+                    total_ret_strat = final_value_strat - total_aportado
+                    
+                    # Valor final do Benchmark
+                    final_value_bench = dca_curve['BOVA11.SA'].iloc[-1]
+                    total_ret_bench = final_value_bench - total_aportado
+                    
+                    
+                    col_dca1, col_dca2, col_dca3 = st.columns(3)
+                    col_dca1.metric("Total Aportado", f"R$ {total_aportado:,.2f}")
+                    col_dca2.metric("Valor Final (Estratégia)", f"R$ {final_value_strat:,.2f}", delta=f"R$ {total_ret_strat:,.2f} de lucro")
+                    col_dca3.metric("Valor Final (Benchmark)", f"R$ {final_value_bench:,.2f}", delta=f"R$ {total_ret_bench:,.2f} de lucro")
+                    
+                    
+                    fig_dca = px.line(dca_curve, title="Curva de Aportes Mensais (DCA): Estratégia vs BOVA11.SA")
+                    st.plotly_chart(fig_dca, use_container_width=True)
+                    
+
+                    st.markdown("### 🛒 Histórico de Compras Mensais na Estratégia")
+                    st.dataframe(transactions.head(num_aportes * top_n)) # Limita a exibição para clareza
+                else:
+                    st.warning("Dados insuficientes para realizar a simulação DCA.")
+
+
         with tab3:
+            # ... (código da tab 3) ...
             st.subheader("Correlação entre Fatores (Normalizados)")
             if norm_cols:
                 corr = final_df[norm_cols].corr()
