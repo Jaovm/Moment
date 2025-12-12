@@ -225,7 +225,7 @@ def run_dca_backtest(
     top_n: int, 
     dca_amount: float, 
     use_vol_target: bool,
-    use_sector_neutrality: bool, # Novo parâmetro
+    use_sector_neutrality: bool, 
     start_date: datetime,
     end_date: datetime
 ):
@@ -425,6 +425,7 @@ def main():
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
     
     use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso?", True)
+    # A linha abaixo foi corrigida para usar 'width' conforme o warning do Streamlit
     target_vol = st.sidebar.slider("Volatilidade Alvo (Apenas para referência)", 0.05, 0.30, 0.15) if use_vol_target else None
     
     # NOVO CONTROLE PARA NEUTRALIDADE SETORIAL
