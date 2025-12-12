@@ -308,14 +308,14 @@ def run_rebalancing_backtest(
                 if new_col in df_master_norm.columns:
                     z_cols.append(new_col)
 
-        # --------------------- FIX DO KEYERROR ---------------------
-        # Filtra tickers sem NENHUM score calculado (todos os Z-scores são NaN)
+        # --------------------- FIX DO KEYERROR: 'Composite_Score' ---------------------
+        # Filtra tickers sem NENHUM score calculado (todos os Z-scores são NaN), 
+        # garantindo que apenas DataFrames com tickers elegíveis sejam processados.
         if z_cols:
             df_to_score = df_master_norm.dropna(subset=z_cols, how='all')
         else:
-            df_to_score = pd.DataFrame(columns=df_master_norm.columns) # DataFrame vazio se não houver scores
+            df_to_score = pd.DataFrame(columns=df_master_norm.columns) 
         
-        # O build_composite_score calcula o Composite_Score
         final_df = build_composite_score(df_to_score, weights_dict) 
         # ------------------- FIM DO FIX ---------------------------
 
@@ -393,7 +393,9 @@ def run_rebalancing_backtest(
         period_prices = prices[(prices.index >= current_date) & (prices.index <= end_period)]
         
         for price_date in period_prices.index:
-            market_value = (holdings.reindex(price_date.index, fill_value=0).fillna(0) * prices.loc[price_date, holdings.index]).sum()
+            # Garante que usamos apenas os tickers que temos na carteira e que têm preço na data
+            valid_tickers = [t for t in holdings.index if t in prices.columns]
+            market_value = (holdings.reindex(valid_tickers, fill_value=0).fillna(0) * prices.loc[price_date, valid_tickers]).sum()
             total_equity = market_value + portfolio['Cash']
             
             bova_price = prices.loc[price_date, 'BOVA11.SA'] if 'BOVA11.SA' in prices.columns else np.nan
@@ -412,6 +414,7 @@ def run_rebalancing_backtest(
         start_value = equity_df['Strategy'].iloc[0]
         
         start_bova_price = equity_df['BOVA11.SA'].iloc[0]
+        # Normaliza o BOVA11.SA para começar com o mesmo valor do primeiro aporte
         equity_df['BOVA11.SA'] = (equity_df['BOVA11.SA'] / start_bova_price) * start_value
         
     trade_df = pd.DataFrame(trade_log)
@@ -571,10 +574,6 @@ def main():
                 final_value = equity_curve_rebal['Strategy'].iloc[-1]
                 bova_final_value = equity_curve_rebal['BOVA11.SA'].iloc[-1]
                 
-                # Retorno sobre o capital investido
-                ret_strategy = (final_value / total_contribution) - 1
-                ret_bova = (bova_final_value / total_contribution) - 1
-
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Aporte Total", f"R$ {total_contribution:,.2f}")
                 m2.metric("Valor Final Estratégia", f"R$ {final_value:,.2f}")
