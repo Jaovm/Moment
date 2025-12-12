@@ -55,11 +55,9 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     for i, t in enumerate(clean_tickers):
         try:
             info = yf.Ticker(t).info
-            # O yfinance às vezes não retorna o 'sector', então usamos 'Unknown' como fallback
             sector = info.get('sector', 'Unknown')
-            # Tratamento para setores que podem ser muito pequenos e quebrar o Z-Score setorial
+            # Tentativa de tratar setores desconhecidos ou com poucos ativos
             if sector in ['Unknown', 'N/A'] and 'longName' in info:
-                 # Tenta inferir pelo nome se for desconhecido
                  if 'Banco' in info['longName'] or 'Financeira' in info['longName']:
                      sector = 'Financial Services'
             
@@ -109,12 +107,10 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
         if len(y) < window: continue
             
         try:
-            # Statsmodels exige matriz 2D para X
             X = sm.add_constant(x.values)
             model = sm.OLS(y.values, X).fit()
             resid = model.resid[:-skip]
             
-            # Garante que não dividimos por zero
             if np.std(resid) == 0 or len(resid) < 2:
                 scores[ticker] = 0
             else:
@@ -146,7 +142,6 @@ def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
     scores = pd.DataFrame(index=fund_df.index)
     if 'returnOnEquity' in fund_df: scores['ROE'] = fund_df['returnOnEquity']
     if 'profitMargins' in fund_df: scores['PM'] = fund_df['profitMargins']
-    # O Score de Dívida deve ser inverso, por isso o -1
     if 'debtToEquity' in fund_df: scores['DE_Inv'] = -1 * fund_df['debtToEquity']
     return scores.mean(axis=1).rename("Quality_Score")
 
@@ -159,10 +154,9 @@ def robust_zscore(series: pd.Series) -> pd.Series:
     series = series.replace([np.inf, -np.inf], np.nan)
     median = series.median()
     mad = (series - median).abs().median()
-    # Evita divisão por zero ou MAD muito pequeno
     if mad == 0 or mad < 1e-6: return series - median 
-    z = (series - median) / (mad * 1.4826) # 1.4826 é o fator de correção para a distribuição normal
-    return z.clip(-3, 3) # Limita outliers extremos
+    z = (series - median) / (mad * 1.4826) 
+    return z.clip(-3, 3) 
 
 def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFrame:
     """Calcula score final ponderado."""
@@ -170,7 +164,6 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     df['Composite_Score'] = 0.0
     for factor_col, weight in weights.items():
         if factor_col in df.columns:
-            # Soma os scores normalizados (Z-Scores) ponderados
             df['Composite_Score'] += df[factor_col].fillna(0) * weight
             
     return df.sort_values('Composite_Score', ascending=False)
@@ -181,22 +174,16 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
 
 def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: int, vol_target: float = None):
     """Define pesos do portfólio (Equal Weight ou Risco Inverso, sempre somando 100%)."""
-    # Seleciona os Top N
     selected = ranked_df.head(top_n).index.tolist()
     if not selected: return pd.Series()
 
     if vol_target is not None:
         # Ponderação por Risco Inverso (Normalizada para 100%)
-        
-        # 1. Calcular volatilidade histórica (3 meses / 63 dias)
         recent_rets = prices[selected].pct_change().tail(63)
         vols = recent_rets.std() * (252**0.5)
-        vols[vols == 0] = 1e-6 # Evita divisão por zero
+        vols[vols == 0] = 1e-6 
         
-        # 2. Calcular Pesos de Risco Inverso
         raw_weights_inv = 1 / vols
-        
-        # 3. Normalização para 100%
         weights = raw_weights_inv / raw_weights_inv.sum() 
             
     else:
@@ -206,22 +193,16 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
     return weights
 
 def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 252):
-    """
-    Simula o desempenho do portfólio selecionado e do Benchmark no período dado (Backtest Simples).
-    Retorna a Curva de Equity.
-    """
+    """Simula o desempenho do portfólio selecionado e do Benchmark no período dado."""
     
-    # 1. Preparação dos Dados
     subset = prices.tail(lookback_days)
     rets = subset.pct_change().dropna()
     
-    # 2. Retorno do Benchmark
     if 'BOVA11.SA' in rets.columns:
         BVSP_ret = rets['BOVA11.SA']
     else:
         BVSP_ret = pd.Series(0, index=rets.index)
     
-    # 3. Retorno do Portfólio 
     valid_tickers = [t for t in weights.index if t in prices.columns]
     
     if valid_tickers:
@@ -229,10 +210,8 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     else:
         port_ret = pd.Series(0, index=rets.index)
         
-    # 4. Cria DataFrame de retornos diários
     daily_rets = pd.DataFrame({'Strategy': port_ret, 'BOVA11.SA': BVSP_ret})
     
-    # 5. Retorno Cumulativo (Curva de Equity)
     cumulative = (1 + daily_rets).cumprod()
     return cumulative.dropna()
 
@@ -248,11 +227,8 @@ def run_dca_backtest(
     start_date: datetime,
     end_date: datetime
 ):
-    """
-    Simula um Backtest com Aportes Mensais (DCA) e rebalanceamento da Estratégia.
-    """
+    """Simula um Backtest com Aportes Mensais (DCA) e rebalanceamento da Estratégia."""
     
-    # 1. Configuração do Backtest
     all_prices = all_prices.ffill() 
     
     dca_start = start_date + timedelta(days=30) 
@@ -282,7 +258,7 @@ def run_dca_backtest(
         prices_for_risk = all_prices.loc[risk_start:eval_date]
         
         
-        # 1. Recalcula Fatores e Pesos
+        # 1. Recalcula Fatores
         if not prices_for_mom.empty:
             res_mom = compute_residual_momentum(prices_for_mom)
         else:
@@ -303,7 +279,7 @@ def run_dca_backtest(
         
         df_master.dropna(thresh=2, inplace=True)
         
-        # --- Lógica de Neutralidade Setorial ---
+        # --- Lógica de Neutralidade Setorial e Z-Score ---
         norm_cols_dca = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
         
         weights_keys = {}
@@ -312,13 +288,12 @@ def run_dca_backtest(
             for c in norm_cols_dca:
                 if c in df_master.columns:
                     new_col = f"{c}_Z_Sector"
-                    # Aplica Z-Score por Setor, garantindo que o grupo tenha mais de 1 elemento para o desvio padrão ser calculado
                     df_master[new_col] = df_master.groupby('Sector')[c].transform(
-                        lambda x: robust_zscore(x) if len(x) > 1 else x - x.median() # Usa score centralizado se só houver 1
+                        lambda x: robust_zscore(x) if len(x) > 1 else x - x.median() 
                     )
                     weights_keys[new_col] = factor_weights.get(c, 0.0)
         else:
-            # Global Z-Score (Comportamento Original)
+            # Global Z-Score
             for c in norm_cols_dca:
                 if c in df_master.columns:
                     new_col = f"{c}_Z"
@@ -338,9 +313,8 @@ def run_dca_backtest(
         
         # --- Passo B: Aporte e Compras ---
         
-        # CORREÇÃO: Garante que pegamos o primeiro preço de negociação no ou após o month_start
+        # CORREÇÃO DE KEYERROR: Garante que pegamos o primeiro preço de negociação no ou após o month_start
         try:
-            # Seleciona todas as linhas no ou após month_start e pega a primeira (iloc[0])
             rebal_price = all_prices.loc[all_prices.index >= month_start].iloc[0].to_frame().T
         except IndexError:
             break
@@ -446,7 +420,6 @@ def main():
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
     
     use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso?", True)
-    # Correção do warning: uso de width='content'
     target_vol = st.sidebar.slider("Volatilidade Alvo (Apenas para referência)", 0.05, 0.30, 0.15) if use_vol_target else None
     
     # NOVO CONTROLE PARA NEUTRALIDADE SETORIAL
@@ -497,7 +470,14 @@ def main():
             cols_to_norm = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
             norm_cols = []
             
-            # --- Lógica de Z-Score (Global ou Setorial) para o Ranking Atual ---
+            # NOVO DICIONÁRIO DE MAPEAMENTO (CORREÇÃO DO NAMERROR)
+            weight_map_live = {
+                'Res_Mom': w_rm,
+                'Fund_Mom': w_fm,
+                'Value': w_val,
+                'Quality': w_qual
+            }
+
             weights_dict_live = {}
             if use_sector_neutrality and 'Sector' in df_master.columns and df_master['Sector'].nunique() > 1:
                 
@@ -508,7 +488,7 @@ def main():
                         df_master[new_col] = df_master.groupby('Sector')[c].transform(
                             lambda x: robust_zscore(x) if len(x) > 1 else x - x.median()
                         )
-                        weights_dict_live[new_col] = eval(f"w_{c.split('_')[0].lower()}")
+                        weights_dict_live[new_col] = weight_map_live.get(c, 0.0) # Uso do dicionário
                         norm_cols.append(new_col)
             else:
                 # Z-Score Global
@@ -516,14 +496,13 @@ def main():
                     if c in df_master.columns:
                         new_col = f"{c}_Z"
                         df_master[new_col] = robust_zscore(df_master[c])
-                        weights_dict_live[new_col] = eval(f"w_{c.split('_')[0].lower()}")
+                        weights_dict_live[new_col] = weight_map_live.get(c, 0.0) # Uso do dicionário
                         norm_cols.append(new_col)
-            # -------------------------------------------------------------------
             
             final_df = build_composite_score(df_master, weights_dict_live)
             weights = construct_portfolio(final_df, prices, top_n, target_vol)
             
-            # 3. Executa Backtest DCA (Passando o novo parâmetro)
+            # 3. Executa Backtest DCA 
             weights_dict_dca = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             
             dca_curve, dca_transactions = run_dca_backtest(
@@ -542,7 +521,6 @@ def main():
 
         # --- OUTPUTS ---
         
-        # Ajuste para usar 'width' em vez de 'use_container_width'
         tab1, tab2, tab3, tab4 = st.tabs([
             "🏆 Ranking & Seleção (Atual)", 
             "📈 Backtest (In-Sample)", 
@@ -559,7 +537,7 @@ def main():
                 st.dataframe(
                     final_df[show_cols].head(top_n).style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
                     height=400,
-                    width='stretch' # Usando 'width'
+                    width='stretch'
                 )
             
             with col2:
@@ -574,7 +552,7 @@ def main():
                     st.table(w_df)
                     
                     fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição")
-                    st.plotly_chart(fig_pie, width='stretch') # Usando 'width'
+                    st.plotly_chart(fig_pie, width='stretch')
 
         with tab2:
             st.subheader("Performance Recente (Simulação de 1 Ano)")
@@ -604,7 +582,7 @@ def main():
                     st.markdown("---")
                     
                     fig = px.line(curve, title="Equity Curve (Compra Única): Estratégia vs BOVA11.SA")
-                    st.plotly_chart(fig, width='stretch') # Usando 'width'
+                    st.plotly_chart(fig, width='stretch')
                 else:
                     st.warning("Dados insuficientes para calcular o backtest no período.")
             else:
@@ -634,7 +612,7 @@ def main():
                 
                 fig_dca = px.line(dca_curve, title="Equity Curve (DCA): Estratégia vs BOVA11.SA")
                 fig_dca.update_layout(yaxis_title="Valor Total do Portfólio (R$)")
-                st.plotly_chart(fig_dca, width='stretch') # Usando 'width'
+                st.plotly_chart(fig_dca, width='stretch')
                 
                 st.subheader("Aportes e Seleções Mensais")
                 dca_transactions['Date'] = dca_transactions['Date'].dt.strftime('%Y-%m-%d')
