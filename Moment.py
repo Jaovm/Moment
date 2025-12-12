@@ -74,7 +74,6 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
             ticker_obj = yf.Ticker(t)
             info = ticker_obj.info
             
-            # ATENÇÃO: enterpriseToEbitda foi removido para evitar KeyError
             data.append({
                 'ticker': t,
                 'Sector': info.get('sector', info.get('Sector', 'Unknown')), 
@@ -192,9 +191,7 @@ def robust_zscore(series: pd.Series) -> pd.Series:
     
     z = pd.Series(np.nan, index=series.index)
     
-    # Evita divisão por zero. Usa 1.4826 para estimar o desvio padrão.
     if mad == 0: 
-        # Se MAD é zero, todos os valores são iguais ou faltantes.
         z.loc[series.index] = 0
     else:
         z.loc[series.index] = (series - median) / (mad * 1.4826)
@@ -207,6 +204,7 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     df['Composite_Score'] = 0.0
     for factor_col, weight in weights.items():
         if factor_col in df.columns:
+            # fillna(0) para tratar os NaNs restantes (tickers com alguns fatores ausentes)
             df['Composite_Score'] += df[factor_col].fillna(0) * weight
             
     return df.sort_values('Composite_Score', ascending=False)
@@ -222,9 +220,8 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
     
     if not selected: return pd.Series()
 
-    # Ponderação por Risco Inverso (Inverse Volatility)
     if vol_target is not None:
-        recent_rets = prices[selected].pct_change().tail(63) # 3 meses (63 dias úteis)
+        recent_rets = prices[selected].pct_change().tail(63) 
         if recent_rets.empty: return pd.Series(1.0/len(selected), index=selected)
         
         vols = recent_rets.std()
@@ -233,7 +230,6 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
         raw_weights_inv = 1 / vols
         weights = raw_weights_inv / raw_weights_inv.sum() 
     else:
-        # Ponderação Igual
         weights = pd.Series(1.0/len(selected), index=selected)
         
     return weights
@@ -252,22 +248,19 @@ def run_rebalancing_backtest(
     O ranking é recalculado a cada rebalanceamento.
     """
     
-    # Datas de rebalanceamento (Fim do mês, mais o primeiro dia de preço)
     rebalance_dates = prices.index.to_series().resample(rebalance_freq).last().dropna()
     
     if len(rebalance_dates) < 2:
         return pd.DataFrame(), pd.DataFrame(), "Dados insuficientes para backtest de rebalanceamento."
 
-    # Usamos o primeiro dia de preço como o primeiro ponto de rebalance (primeiro aporte)
     first_price_date = prices.index[0]
     
-    # Garante que o primeiro rebalance seja a primeira data de preço disponível
     rebalance_dates = rebalance_dates[rebalance_dates > first_price_date]
     rebalance_dates = pd.Index([first_price_date] + rebalance_dates.tolist())
     
     # Inicialização
     portfolio = {'Cash': 0.0}
-    holdings = pd.Series(0.0, index=prices.columns).fillna(0) # Inicializa com zero
+    holdings = pd.Series(0.0, index=prices.columns).fillna(0) 
     equity_curve = []
     trade_log = []
     
@@ -275,8 +268,6 @@ def run_rebalancing_backtest(
     for i in range(len(rebalance_dates)):
         
         current_date = rebalance_dates[i]
-        
-        # O último dia do período é a próxima data de rebalance, ou o último dia do preço
         end_period = rebalance_dates[i+1] if i < len(rebalance_dates) - 1 else prices.index[-1]
         
         # --- Aporte ---
@@ -304,19 +295,30 @@ def run_rebalancing_backtest(
         # Normalização (Global e Setorial)
         df_master_norm = df_master.copy()
         
+        z_cols = []
         for col in ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']:
             if col in df_master_norm.columns and 'Sector' in df_master_norm.columns:
+                new_col = f'{col}_Z'
                 
-                # Normalização Setorial para Value e Quality
                 if col in ['Value', 'Quality']:
-                    df_master_norm[f'{col}_Z'] = df_master_norm.groupby('Sector')[col].transform(robust_zscore)
-                # Normalização Global para Momentum
+                    df_master_norm[new_col] = df_master_norm.groupby('Sector')[col].transform(robust_zscore)
                 else:
-                    df_master_norm[f'{col}_Z'] = robust_zscore(df_master_norm[col])
+                    df_master_norm[new_col] = robust_zscore(df_master_norm[col])
+                
+                if new_col in df_master_norm.columns:
+                    z_cols.append(new_col)
 
-
-        final_df = build_composite_score(df_master_norm.dropna(subset=['Composite_Score']), weights_dict)
+        # --------------------- FIX DO KEYERROR ---------------------
+        # Filtra tickers sem NENHUM score calculado (todos os Z-scores são NaN)
+        if z_cols:
+            df_to_score = df_master_norm.dropna(subset=z_cols, how='all')
+        else:
+            df_to_score = pd.DataFrame(columns=df_master_norm.columns) # DataFrame vazio se não houver scores
         
+        # O build_composite_score calcula o Composite_Score
+        final_df = build_composite_score(df_to_score, weights_dict) 
+        # ------------------- FIM DO FIX ---------------------------
+
         # Seleção e Pesos
         weights_target = construct_portfolio(final_df, prices_upto_current, top_n, vol_target=0.15)
         
@@ -348,7 +350,6 @@ def run_rebalancing_backtest(
         # Vendas (negative trades_value)
         for t in trades_value.index:
             if trades_value.loc[t] < 0 and new_holdings.loc[t] > 0 and current_price.loc[t] > 0:
-                # Calcula o número de ações a vender para atingir o valor alvo
                 shares_to_sell_target = np.floor(-trades_value.loc[t] / current_price.loc[t])
                 shares_to_sell = min(new_holdings.loc[t], shares_to_sell_target)
                 
@@ -363,7 +364,6 @@ def run_rebalancing_backtest(
                     })
 
         # Compras (positive trades_value)
-        # Recalcula o total_value após as vendas, e os trades_value necessários
         new_total_value = new_cash + (new_holdings * current_price).sum()
         target_value = new_total_value * weights_target.reindex(current_price.index, fill_value=0).fillna(0)
         current_value = new_holdings * current_price
@@ -371,7 +371,6 @@ def run_rebalancing_backtest(
 
         for t in trades_value_new.index:
             if trades_value_new.loc[t] > 0 and current_price.loc[t] > 0 and new_cash > 0:
-                # O limite é o necessário (trades_value_new) ou o que o cash permite
                 buy_limit_value = min(trades_value_new.loc[t], new_cash)
                 shares_to_buy = np.floor(buy_limit_value / current_price.loc[t])
                 
@@ -397,7 +396,6 @@ def run_rebalancing_backtest(
             market_value = (holdings.reindex(price_date.index, fill_value=0).fillna(0) * prices.loc[price_date, holdings.index]).sum()
             total_equity = market_value + portfolio['Cash']
             
-            # Valor do Benchmark
             bova_price = prices.loc[price_date, 'BOVA11.SA'] if 'BOVA11.SA' in prices.columns else np.nan
             
             equity_curve.append({
@@ -411,10 +409,8 @@ def run_rebalancing_backtest(
     equity_df = pd.DataFrame(equity_curve).drop_duplicates(subset='Date').set_index('Date').sort_index()
     
     if not equity_df.empty and 'BOVA11.SA' in equity_df.columns:
-        # A carteira começa com o primeiro aporte (R$1000)
         start_value = equity_df['Strategy'].iloc[0]
         
-        # Normaliza a curva BOVA11.SA para o primeiro ponto de preço disponível para o BOVA11.SA
         start_bova_price = equity_df['BOVA11.SA'].iloc[0]
         equity_df['BOVA11.SA'] = (equity_df['BOVA11.SA'] / start_bova_price) * start_value
         
@@ -461,7 +457,6 @@ def main():
             
             st.write("📥 Baixando dados de mercado e fundamentais (Comparação Ampla)...")
             end_date = datetime.now()
-            # Aumentamos o histórico para permitir backtest realista
             start_date_backtest = end_date - timedelta(days=730) 
             
             prices = fetch_price_data(user_tickers, start_date_backtest, end_date) 
@@ -474,7 +469,7 @@ def main():
 
             st.write("🧮 Calculando fatores multifatoriais (Snapshot)...")
             
-            # Calculo do Snapshot Atual (Para Tab 1, 2, 4)
+            # Calculo do Snapshot Atual (Para Tab 1, 3, 4, 5)
             res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals_broad)
             val_score = compute_value_score(fundamentals_broad)
@@ -570,13 +565,20 @@ def main():
             if not equity_curve_rebal.empty:
                 
                 # Cálculo de Métricas (Aporte Contínuo)
-                strategy_ret = (equity_curve_rebal['Strategy'].iloc[-1] / equity_curve_rebal['Strategy'].iloc[0]) - 1
-                bova_ret = (equity_curve_rebal['BOVA11.SA'].iloc[-1] / equity_curve_rebal['BOVA11.SA'].iloc[0]) - 1
+                # Soma dos aportes
+                total_contribution = 1000.0 * (len(equity_curve_rebal.index.to_series().resample('M').last().dropna()))
                 
+                final_value = equity_curve_rebal['Strategy'].iloc[-1]
+                bova_final_value = equity_curve_rebal['BOVA11.SA'].iloc[-1]
+                
+                # Retorno sobre o capital investido
+                ret_strategy = (final_value / total_contribution) - 1
+                ret_bova = (bova_final_value / total_contribution) - 1
+
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Valor Final Estratégia", f"R$ {equity_curve_rebal['Strategy'].iloc[-1]:,.2f}")
-                m2.metric("Valor Final BOVA11", f"R$ {equity_curve_rebal['BOVA11.SA'].iloc[-1]:,.2f}")
-                m3.metric("Retorno Total (Estratégia)", f"{strategy_ret:.2%}")
+                m1.metric("Aporte Total", f"R$ {total_contribution:,.2f}")
+                m2.metric("Valor Final Estratégia", f"R$ {final_value:,.2f}")
+                m3.metric("Valor Final BOVA11", f"R$ {bova_final_value:,.2f}")
                 
                 fig = px.line(equity_curve_rebal, title="Evolução da Carteira (Com Aporte)")
                 st.plotly_chart(fig, use_container_width=True)
@@ -592,7 +594,6 @@ def main():
             st.subheader("Simulação (Backtest In-Sample - Pesos Fixos)")
             
             if not weights.empty:
-                # Reutilizando a função run_backtest simples para comparação
                 def run_backtest_simple(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 504):
                     valid_tickers = [t for t in weights.index if t in prices.columns]
                     if not valid_tickers: return pd.DataFrame()
