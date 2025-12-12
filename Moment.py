@@ -121,22 +121,32 @@ def compute_fundamental_momentum(fund_df: pd.DataFrame) -> pd.Series:
     for m in metrics:
         if m in fund_df.columns:
             s = fund_df[m].fillna(fund_df[m].median())
-            temp_df[m] = (s - s.mean()) / s.std()
+            # Não faz Z-score aqui. Apenas soma os valores para serem normalizados depois.
+            temp_df[m] = s
     return temp_df.mean(axis=1).rename("Fundamental_Momentum")
 
 def compute_value_score(fund_df: pd.DataFrame) -> pd.Series:
-    """Score de Valor: Inverso de P/E e P/B."""
+    """Score de Valor: Inverso de P/E e P/B. Ponderação 50/50."""
     scores = pd.DataFrame(index=fund_df.index)
-    if 'forwardPE' in fund_df: scores['EP'] = np.where(fund_df['forwardPE'] > 0, 1/fund_df['forwardPE'], 0)
-    if 'priceToBook' in fund_df: scores['BP'] = np.where(fund_df['priceToBook'] > 0, 1/fund_df['priceToBook'], 0)
+    # EP (Earnings Yield)
+    if 'forwardPE' in fund_df.columns: 
+        scores['EP'] = np.where(fund_df['forwardPE'] > 0, 1/fund_df['forwardPE'], 0)
+    # BP (Book to Price)
+    if 'priceToBook' in fund_df.columns: 
+        scores['BP'] = np.where(fund_df['priceToBook'] > 0, 1/fund_df['priceToBook'], 0)
+        
     return scores.mean(axis=1).rename("Value_Score")
 
 def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
-    """Score de Qualidade: ROE, Margem e Alavancagem."""
+    """Score de Qualidade: ROE, Margem e Alavancagem. Ponderação 1/3 para cada."""
     scores = pd.DataFrame(index=fund_df.index)
-    if 'returnOnEquity' in fund_df: scores['ROE'] = fund_df['returnOnEquity']
-    if 'profitMargins' in fund_df: scores['PM'] = fund_df['profitMargins']
-    if 'debtToEquity' in fund_df: scores['DE_Inv'] = -1 * fund_df['debtToEquity']
+    if 'returnOnEquity' in fund_df.columns: scores['ROE'] = fund_df['returnOnEquity']
+    if 'profitMargins' in fund_df.columns: scores['PM'] = fund_df['profitMargins']
+    # Inverso do Dívida/Patrimônio
+    if 'debtToEquity' in fund_df.columns: 
+        scores['DE_Inv'] = np.where(fund_df['debtToEquity'] > 0, -1 * fund_df['debtToEquity'], 0)
+        
+    # A Média é feita sobre os scores (que serão normalizados depois)
     return scores.mean(axis=1).rename("Quality_Score")
 
 # ==============================================================================
@@ -144,12 +154,22 @@ def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
 # ==============================================================================
 
 def robust_zscore(series: pd.Series) -> pd.Series:
-    """Z-Score Robusto."""
-    series = series.replace([np.inf, -np.inf], np.nan)
+    """Z-Score Robusto (Usa Mediana e MAD para robustez contra outliers)."""
+    series = series.replace([np.inf, -np.inf], np.nan).dropna()
+    if series.empty: return pd.Series(np.nan, index=series.index)
+        
     median = series.median()
     mad = (series - median).abs().median()
-    if mad == 0: return series - median
-    z = (series - median) / (mad * 1.4826)
+    
+    # Adiciona índice para evitar erro de alinhamento no .transform()
+    z = pd.Series(np.nan, index=series.index)
+    
+    if mad == 0: 
+        z.loc[series.index] = series - median
+    else:
+        # 1.4826 é o fator de consistência para a Distribuição Normal
+        z.loc[series.index] = (series - median) / (mad * 1.4826)
+        
     return z.clip(-3, 3)
 
 def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFrame:
@@ -158,6 +178,7 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     df['Composite_Score'] = 0.0
     for factor_col, weight in weights.items():
         if factor_col in df.columns:
+            # Multiplica o fator normalizado pelo peso. Usa fillna(0) antes de somar.
             df['Composite_Score'] += df[factor_col].fillna(0) * weight
             
     return df.sort_values('Composite_Score', ascending=False)
@@ -165,6 +186,9 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
 # ==============================================================================
 # MÓDULO 4: PORTFOLIO & BACKTEST (NORMALIZAÇÃO FORÇADA)
 # ==============================================================================
+
+# (O restante do código, Módulo 4 e APP Principal, não precisa de grandes alterações,
+# mas estou incluindo o MAIN com a lógica de normalização ajustada)
 
 def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: int, vol_target: float = None):
     """Define pesos do portfólio (Equal Weight ou Risco Inverso, sempre somando 100%)."""
@@ -272,9 +296,11 @@ def main():
             val_score = compute_value_score(fundamentals)
             qual_score = compute_quality_score(fundamentals)
 
-            # 3. Consolidação
-            st.write("⚖️ Normalizando e Ranking...")
-            df_master = pd.DataFrame(index=tickers)
+            # 3. Consolidação e Normalização Setorial (Ajuste principal)
+            st.write("⚖️ Normalizando e Ranking (Value e Quality setorialmente)...")
+            
+            # Alinha o DataFrame mestre com os fundamentos que contêm o setor
+            df_master = pd.DataFrame(index=fundamentals.index)
             df_master['Res_Mom'] = res_mom
             df_master['Fund_Mom'] = fund_mom
             df_master['Value'] = val_score
@@ -283,17 +309,36 @@ def main():
             if 'sector' in fundamentals.columns:
                 df_master['Sector'] = fundamentals['sector']
             
-            df_master.dropna(thresh=2, inplace=True)
+            # Remove linhas que não têm pelo menos 2 fatores calculados
+            df_master.dropna(thresh=2, inplace=True) 
 
-            # Z-Score Robusto
-            cols_to_norm = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
+            # Define fatores para normalização setorial e global
+            cols_to_norm_sectorial = ['Value', 'Quality']
+            cols_to_norm_global = ['Res_Mom', 'Fund_Mom'] 
+
             norm_cols = []
-            for c in cols_to_norm:
+            
+            # 3.1 Normalização Setorial (Value e Quality)
+            # A ação é comparada apenas com seus pares de setor.
+            if 'Sector' in df_master.columns:
+                for c in cols_to_norm_sectorial:
+                    if c in df_master.columns:
+                        new_col = f"{c}_Z"
+                        # Aplica o robust_zscore agrupado por 'Sector'
+                        df_master[new_col] = df_master.groupby('Sector')[c].transform(robust_zscore)
+                        norm_cols.append(new_col)
+            
+            # 3.2 Normalização Global (Momentum)
+            # A ação é comparada a todas as outras no universo.
+            for c in cols_to_norm_global:
                 if c in df_master.columns:
                     new_col = f"{c}_Z"
                     df_master[new_col] = robust_zscore(df_master[c])
                     norm_cols.append(new_col)
             
+            # Remove ativos onde a normalização resultou em NaN (devido a setores com poucas amostras)
+            df_master.dropna(subset=[f'{c}_Z' for c in cols_to_norm_sectorial if f'{c}_Z' in df_master.columns], inplace=True)
+
             weights_dict = {
                 'Res_Mom_Z': w_rm, 'Fund_Mom_Z': w_fm, 
                 'Value_Z': w_val, 'Quality_Z': w_qual
