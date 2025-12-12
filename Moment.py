@@ -16,7 +16,6 @@ st.set_page_config(
 )
 
 # Universo Amplo para Normalização (Comparação Externa)
-# Este é um subconjunto robusto de ações brasileiras para garantir pares setoriais.
 BROAD_UNIVERSE = [
     'VALE3.SA', 'PETR4.SA', 'ITUB3.SA', 'ITUB4.SA', 'BBDC4.SA', 'ABEV3.SA', 
     'RENT3.SA', 'WEGE3.SA', 'B3SA3.SA', 'SUZB3.SA', 'BBAS3.SA', 'PRIO3.SA', 
@@ -47,8 +46,13 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
             auto_adjust=False
         )['Adj Close']
         
+        # Correção para yfinance retornando MultiIndex nas colunas
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
+            
+        # Garante que é um DataFrame mesmo com 1 ticker
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
             
         return data.dropna(how='all')
     except Exception as e:
@@ -59,21 +63,27 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
 def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     """Busca snapshots fundamentais atuais de um universo amplo para normalização."""
     
-    # Combina a lista do usuário com o universo amplo para garantir a base de comparação setorial
     all_tickers = list(set(tickers) | set(BROAD_UNIVERSE))
+    # Remove duplicatas e garante BOVA11 fora dos fundamentos
     clean_tickers = [t for t in all_tickers if t != 'BOVA11.SA']
     
     data = []
     progress_bar = st.progress(0)
     total = len(clean_tickers)
     
-    # Apenas busca os dados para os tickers necessários
     for i, t in enumerate(clean_tickers):
         try:
-            info = yf.Ticker(t).info
+            # Tenta pegar info. Se falhar, pula o ticker sem quebrar o app
+            ticker_obj = yf.Ticker(t)
+            info = ticker_obj.info
+            
+            # Validação básica: se não tem setor, provavelmente o dado está ruim
+            if 'sector' not in info and 'Sector' not in info:
+                pass 
+                
             data.append({
                 'ticker': t,
-                'sector': info.get('sector', 'Unknown'),
+                'Sector': info.get('sector', info.get('Sector', 'Unknown')), # Padroniza para 'Sector'
                 'forwardPE': info.get('forwardPE', np.nan),
                 'priceToBook': info.get('priceToBook', np.nan),
                 'enterpriseToEbitda': info.get('enterpriseToEbitda', np.nan),
@@ -83,14 +93,23 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
                 'earningsGrowth': info.get('earningsGrowth', np.nan),
                 'revenueGrowth': info.get('revenueGrowth', np.nan)
             })
-        except:
-            pass
-        progress_bar.progress((i + 1) / total)
+        except Exception:
+            pass # Ignora erros de conexão pontuais
+            
+        if (i + 1) % 5 == 0: # Atualiza a barra menos vezes para performance
+            progress_bar.progress(min((i + 1) / total, 1.0))
         
     progress_bar.empty()
+    
     if not data:
         return pd.DataFrame()
-    return pd.DataFrame(data).set_index('ticker')
+        
+    df = pd.DataFrame(data).set_index('ticker')
+    # Remove linhas onde tudo é NaN (exceto Sector)
+    cols_to_check = [c for c in df.columns if c != 'Sector']
+    df = df.dropna(subset=cols_to_check, how='all')
+    
+    return df
 
 # ==============================================================================
 # MÓDULO 2: CÁLCULO DE FATORES (Math & Logic)
@@ -98,8 +117,15 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
     """Calcula Residual Momentum (Alpha) vs BOVA11.SA."""
+    if price_df.empty: return pd.Series(dtype=float)
+    
     df = price_df.copy()
-    monthly = df.resample('ME').last()
+    # Resample mensal ('ME' é o novo alias para Month End no pandas 2.2+, 'M' para antigos)
+    try:
+        monthly = df.resample('ME').last()
+    except:
+        monthly = df.resample('M').last()
+        
     rets = monthly.pct_change().dropna()
     
     if 'BOVA11.SA' not in rets.columns: return pd.Series(dtype=float)
@@ -143,24 +169,19 @@ def compute_fundamental_momentum(fund_df: pd.DataFrame) -> pd.Series:
 def compute_value_score(fund_df: pd.DataFrame) -> pd.Series:
     """Score de Valor: Inverso de P/E e P/B. Ponderação 50/50."""
     scores = pd.DataFrame(index=fund_df.index)
-    # EP (Earnings Yield = 1/P/E)
     if 'forwardPE' in fund_df.columns: 
         scores['EP'] = np.where(fund_df['forwardPE'] > 0, 1/fund_df['forwardPE'], 0)
-    # BP (Book to Price = 1/P/B)
     if 'priceToBook' in fund_df.columns: 
         scores['BP'] = np.where(fund_df['priceToBook'] > 0, 1/fund_df['priceToBook'], 0)
         
     return scores.mean(axis=1).rename("Value_Score")
 
 def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
-    """Score de Qualidade: ROE, Margem e Alavancagem. Ponderação 1/3 para cada."""
+    """Score de Qualidade: ROE, Margem e Alavancagem."""
     scores = pd.DataFrame(index=fund_df.index)
-    # ROE e Margem
     if 'returnOnEquity' in fund_df.columns: scores['ROE'] = fund_df['returnOnEquity']
     if 'profitMargins' in fund_df.columns: scores['PM'] = fund_df['profitMargins']
-    # Inverso do Dívida/Patrimônio (Alavancagem - menor é melhor, por isso o sinal negativo)
     if 'debtToEquity' in fund_df.columns: 
-        # Trata DTE < 0 como 0 para evitar inversão de sinal no score final.
         safe_dte = np.where(fund_df['debtToEquity'] > 0, fund_df['debtToEquity'], 0)
         scores['DE_Inv'] = -1 * safe_dte
         
@@ -171,8 +192,7 @@ def compute_quality_score(fund_df: pd.DataFrame) -> pd.Series:
 # ==============================================================================
 
 def robust_zscore(series: pd.Series) -> pd.Series:
-    """Z-Score Robusto (Usa Mediana e MAD para robustez contra outliers)."""
-    # Remove infinitos e NaNs antes do cálculo
+    """Z-Score Robusto."""
     series = series.replace([np.inf, -np.inf], np.nan).dropna()
     if series.empty: return pd.Series(np.nan, index=series.index)
         
@@ -184,7 +204,6 @@ def robust_zscore(series: pd.Series) -> pd.Series:
     if mad == 0: 
         z.loc[series.index] = series - median
     else:
-        # 1.4826 é o fator de consistência para a Distribuição Normal
         z.loc[series.index] = (series - median) / (mad * 1.4826)
         
     return z.clip(-3, 3)
@@ -200,56 +219,45 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     return df.sort_values('Composite_Score', ascending=False)
 
 # ==============================================================================
-# MÓDULO 4: PORTFOLIO & BACKTEST (NORMALIZAÇÃO FORÇADA)
+# MÓDULO 4: PORTFOLIO & BACKTEST
 # ==============================================================================
 
 def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: int, vol_target: float = None):
-    """Define pesos do portfólio (Equal Weight ou Risco Inverso, sempre somando 100%)."""
-    # Garante que top_n não seja maior que o número de ativos no ranking
-    top_n = min(top_n, len(ranked_df))
+    """Define pesos do portfólio."""
+    # Filtra para garantir que só temos ativos com preço disponível
+    available_tickers = [t for t in ranked_df.index if t in prices.columns]
+    selected = ranked_df.loc[available_tickers].head(top_n).index.tolist()
     
-    selected = ranked_df.head(top_n).index.tolist()
     if not selected: return pd.Series()
 
     if vol_target is not None:
-        # Ponderação por Risco Inverso 
-        
-        # 1. Calcular volatilidade histórica (3 meses / 63 dias)
         recent_rets = prices[selected].pct_change().tail(63)
+        if recent_rets.empty: return pd.Series(1.0/len(selected), index=selected)
+        
         vols = recent_rets.std() * (252**0.5)
-        vols[vols == 0] = 1e-6 # Evita divisão por zero
+        vols = vols.replace(0, 1e-6) # Evita div por zero
         
-        # 2. Calcular Pesos de Risco Inverso
         raw_weights_inv = 1 / vols
-        
-        # 3. FORÇA A NORMALIZAÇÃO para 100%
         weights = raw_weights_inv / raw_weights_inv.sum() 
-            
     else:
-        # Pesos Iguais (Equal Weight)
         weights = pd.Series(1.0/len(selected), index=selected)
         
     return weights
 
 def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 252):
-    """Simula o desempenho do portfólio selecionado."""
+    """Simula o desempenho."""
     valid_tickers = [t for t in weights.index if t in prices.columns]
     if not valid_tickers: return pd.DataFrame()
         
-    # Recorta o período
     subset = prices.tail(lookback_days)
     rets = subset.pct_change().dropna()
     
-    # 1. Retorno do Portfólio (Usa os pesos normalizados a 100%)
-    port_ret = rets[valid_tickers].dot(weights[valid_tickers].fillna(0))
+    if rets.empty: return pd.DataFrame()
     
-    # 2. Retorno do Benchmark
+    port_ret = rets[valid_tickers].dot(weights[valid_tickers].fillna(0))
     BVSP_ret = rets['BOVA11.SA'] if 'BOVA11.SA' in rets.columns else pd.Series(0, index=rets.index)
     
-    # Cria DataFrame de retornos diários
     daily_rets = pd.DataFrame({'Strategy': port_ret, 'BOVA11.SA': BVSP_ret})
-    
-    # Retorno Cumulativo (Começa em 1.0)
     cumulative = (1 + daily_rets).cumprod()
     return cumulative.dropna()
 
@@ -266,7 +274,6 @@ def main():
     default_univ = "ITUB3.SA, TOTS3.SA, MDIA3.SA, TAEE3.SA, BBSE3.SA, WEGE3.SA, PSSA3.SA, EGIE3.SA, B3SA3.SA, VIVT3.SA, AGRO3.SA, PRIO3.SA, BBAS3.SA, BPAC11.SA, SBSP3.SA, SAPR4.SA, CMIG3.SA, UNIP6.SA, FRAS3.SA"
     ticker_input = st.sidebar.text_area("Tickers (Separados por vírgula)", default_univ, height=100)
     
-    # Garante que apenas os tickers do usuário sejam usados no ranking final
     user_tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
 
     st.sidebar.header("2. Pesos dos Fatores (Alpha)")
@@ -277,8 +284,6 @@ def main():
 
     st.sidebar.header("3. Construção de Portfólio (Risco)")
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 10)
-    
-    # Ponderação por Risco Inverso
     use_vol_target = st.sidebar.checkbox("Usar Ponderação por Risco Inverso?", True)
     target_vol = st.sidebar.slider("Volatilidade Alvo (Apenas para referência)", 0.05, 0.30, 0.15) if use_vol_target else None
     
@@ -292,92 +297,97 @@ def main():
 
         with st.status("Executando Pipeline Quant...", expanded=True) as status:
             
-            # 1. Dados: Fetch de preços (apenas user_tickers) e fundamentos (broad + user)
             st.write("📥 Baixando dados de mercado e fundamentais (Comparação Ampla)...")
             end_date = datetime.now()
             start_date = end_date - timedelta(days=730)
             
-            # Preços só precisam dos tickers do usuário + BOVA11
             prices = fetch_price_data(user_tickers, start_date, end_date) 
-            
-            # Fundamentos usam o universo ampliado para normalização
             fundamentals_broad = fetch_fundamentals(user_tickers)
             
             if prices.empty or fundamentals_broad.empty:
-                st.error("Não foi possível obter dados suficientes.")
+                st.error("Não foi possível obter dados suficientes. Verifique os tickers.")
                 status.update(label="Erro!", state="error")
                 return
 
-            # 2. Cálculos: Feitos sobre o universo amplo de fundamentos
             st.write("🧮 Calculando fatores multifatoriais...")
-            res_mom = compute_residual_momentum(prices) # Residual Mom: Feito apenas no user_tickers
+            res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals_broad)
             val_score = compute_value_score(fundamentals_broad)
             qual_score = compute_quality_score(fundamentals_broad)
 
-            # 3. Consolidação e Normalização (Ajuste para Comparação Externa)
-            st.write("⚖️ Normalizando e Ranking (Value e Quality setorialmente vs. Mercado Amplo)...")
+            st.write("⚖️ Normalizando e Ranking (Setorial vs. Mercado Amplo)...")
             
-            # DataFrame mestre com todos os ativos do fetch
             df_master = pd.DataFrame(index=fundamentals_broad.index)
             df_master['Res_Mom'] = res_mom
             df_master['Fund_Mom'] = fund_mom
             df_master['Value'] = val_score
             df_master['Quality'] = qual_score
             
-            if 'sector' in fundamentals_broad.columns:
-                df_master['Sector'] = fundamentals_broad['sector']
+            # Garante o nome correto da coluna de setor (Case sensitive fix)
+            if 'Sector' in fundamentals_broad.columns:
+                df_master['Sector'] = fundamentals_broad['Sector']
             
-            # Filtra o master para incluir apenas os tickers do usuário para o ranking final
-            df_master_filtered = df_master.loc[df_master.index.intersection(user_tickers)].copy()
+            # Filtra apenas tickers do usuário que existem nos dados baixados
+            valid_user_tickers = [t for t in user_tickers if t in df_master.index]
+            df_master_filtered = df_master.loc[valid_user_tickers].copy()
+            
+            if df_master_filtered.empty:
+                st.error("Nenhum ticker válido encontrado nos dados fundamentais.")
+                status.update(label="Erro!", state="error")
+                return
 
-            # Z-Score Robusto sobre o universo amplo (inclusive dos tickers não filtrados)
             cols_to_norm_sectorial = ['Value', 'Quality']
             cols_to_norm_global = ['Res_Mom', 'Fund_Mom'] 
-
             norm_cols = []
             
-            # Normalização Setorial (Value e Quality): usa o universe amplo para o cálculo
+            # Normalização
             if 'Sector' in df_master.columns:
                 for c in cols_to_norm_sectorial:
                     if c in df_master.columns:
                         new_col = f"{c}_Z"
-                        # Aplica o Z-Score robusto AGRUPADO pelo setor no universo amplo
+                        # Transformação ocorre no DF amplo, depois mapeamos para o filtrado
                         df_master[new_col] = df_master.groupby('Sector')[c].transform(robust_zscore)
                         
-                        # Transfere APENAS os Z-Scores calculados para o DF filtrado
-                        if new_col in df_master.columns:
-                             df_master_filtered[new_col] = df_master[new_col]
-                             norm_cols.append(new_col)
+                        # Atribuição segura usando .loc
+                        df_master_filtered[new_col] = df_master.loc[df_master_filtered.index, new_col]
+                        norm_cols.append(new_col)
             
-            # Normalização Global (Momentum): usa o universo amplo para o cálculo
             for c in cols_to_norm_global:
                 if c in df_master.columns:
                     new_col = f"{c}_Z"
                     df_master[new_col] = robust_zscore(df_master[c])
                     
-                    # Transfere APENAS os Z-Scores calculados para o DF filtrado
-                    if new_col in df_master.columns:
-                        df_master_filtered[new_col] = df_master[new_col]
-                        norm_cols.append(new_col)
+                    df_master_filtered[new_col] = df_master.loc[df_master_filtered.index, new_col]
+                    norm_cols.append(new_col)
             
-            # Remove ativos que não puderam ser pontuados (NaN após normalização)
-            df_master_filtered.dropna(subset=[f'{c}_Z' for c in cols_to_norm_sectorial if f'{c}_Z' in df_master_filtered.columns] + [f'{c}_Z' for c in cols_to_norm_global if f'{c}_Z' in df_master_filtered.columns], how='all', inplace=True)
+            # Limpeza de NaNs nos scores
+            final_cols = [f'{c}_Z' for c in cols_to_norm_sectorial if f'{c}_Z' in df_master_filtered] + \
+                         [f'{c}_Z' for c in cols_to_norm_global if f'{c}_Z' in df_master_filtered]
+                         
+            df_master_filtered.dropna(subset=final_cols, how='all', inplace=True)
 
             weights_dict = {
                 'Res_Mom_Z': w_rm, 'Fund_Mom_Z': w_fm, 
                 'Value_Z': w_val, 'Quality_Z': w_qual
             }
             
-            # Calcula o Score Composto final APENAS nos tickers do usuário
             final_df = build_composite_score(df_master_filtered, weights_dict)
             
             st.write("⚖️ Calculando alocação e backtest...")
             weights = construct_portfolio(final_df, prices, top_n, target_vol)
             
-            # Junta os dados brutos com o score final para a aba de detalhes
-            fundamentals_final = fundamentals_broad.loc[final_df.index].join(final_df[norm_cols + ['Composite_Score', 'Sector']])
+            # --- CORREÇÃO DO JOIN (Evita erro de sobreposição de colunas) ---
+            # Selecionamos apenas as colunas CALCULADAS do final_df para juntar com os dados brutos
+            cols_to_merge = [c for c in final_df.columns if c not in fundamentals_broad.columns]
             
+            # Merge seguro usando índices
+            fundamentals_final = pd.merge(
+                fundamentals_broad.loc[final_df.index],
+                final_df[cols_to_merge],
+                left_index=True,
+                right_index=True,
+                how='inner'
+            )
 
             status.update(label="Concluído!", state="complete", expanded=False)
 
@@ -389,8 +399,8 @@ def main():
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.subheader("Top Picks (Selecionados pelo Score)")
-                st.markdown(f"**Nota:** Os scores de Valor e Qualidade são calculados em relação a um universo amplo de mais de {len(BROAD_UNIVERSE)} ativos, garantindo maior efetividade na comparação setorial.")
+                st.subheader("Top Picks")
+                st.markdown(f"**Nota:** Comparação feita contra universo de {len(fundamentals_broad)} ativos.")
                 
                 show_cols = ['Composite_Score', 'Sector'] + norm_cols
                 st.dataframe(
@@ -403,119 +413,74 @@ def main():
                 st.subheader("Alocação Sugerida")
                 if not weights.empty:
                     w_df = weights.to_frame(name="Peso")
-                    total_sum = weights.sum()
-                    
-                    st.metric("Soma da Alocação", f"{total_sum:.2%}")
-                    
+                    st.metric("Soma da Alocação", f"{weights.sum():.2%}")
                     w_df["Peso"] = w_df["Peso"].map("{:.2%}".format)
                     st.table(w_df)
-                    
                     fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
         with tab2:
-            st.subheader("Performance Recente (Simulação de 1 Ano)")
-            st.info(f"Portfólio de {len(weights)} ativos rebalanceado por Risco Inverso (Target Vol é apenas referência).")
-            
+            st.subheader("Simulação (Backtest)")
             if not weights.empty:
                 curve = run_backtest(weights, prices)
-                
                 if not curve.empty and len(curve) > 1:
-                    daily_rets = curve.pct_change().dropna()
-                    
                     tot_ret = curve['Strategy'].iloc[-1] - 1
+                    daily_rets = curve.pct_change().dropna()
                     vol = daily_rets['Strategy'].std() * (252**0.5)
-                    ret_bench = curve['BOVA11.SA'].iloc[-1] - 1 if 'BOVA11.SA' in curve.columns else np.nan
-                    
                     sharpe = tot_ret / vol if vol > 0 else 0
                     
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Retorno Total (Estratégia)", f"{tot_ret:.2%}")
-                    m2.metric("Volatilidade Anual", f"{vol:.2%}")
-                    m3.metric("Sharpe Ratio (Anual)", f"{sharpe:.2f}")
-                    if not np.isnan(ret_bench):
-                         m4.metric("Retorno Benchmark (BOVA11.SA)", f"{ret_bench:.2%}")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Retorno Total", f"{tot_ret:.2%}")
+                    m2.metric("Volatilidade", f"{vol:.2%}")
+                    m3.metric("Sharpe", f"{sharpe:.2f}")
                     
-                    fig = px.line(curve, title="Equity Curve: Estratégia vs BOVA11.SA")
+                    fig = px.line(curve, title="Equity Curve")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning("Dados insuficientes para calcular o backtest no período.")
+                    st.warning("Dados insuficientes para backtest.")
             else:
                 st.warning("Nenhum ativo selecionado.")
 
         with tab3:
-            st.subheader("Dados Fundamentais Brutos (Apenas ativos selecionados)")
-            st.info("Valores de Valor (P/L, P/VPA) e Qualidade (ROE, Margem) são normalizados setorialmente contra um universo amplo na aba Ranking.")
+            st.subheader("Dados Fundamentais Brutos")
+            st.dataframe(fundamentals_broad.loc[final_df.index])
             
-            show_fund_cols = ['sector', 'forwardPE', 'priceToBook', 'returnOnEquity', 'profitMargins', 'debtToEquity', 'earningsGrowth', 'revenueGrowth']
-            st.dataframe(fundamentals_broad.loc[final_df.index, show_fund_cols].style.format("{:.2f}", subset=['forwardPE', 'priceToBook', 'enterpriseToEbitda', 'debtToEquity']).format("{:.2%}", subset=['returnOnEquity', 'profitMargins', 'earningsGrowth', 'revenueGrowth']))
-            
-            st.subheader("Correlação entre Fatores (Normalizados)")
             if norm_cols:
+                st.subheader("Correlação (Fatores Normalizados)")
                 corr = final_df[norm_cols].corr()
-                fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', title="Mapa de Calor de Correlação")
+                fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r')
                 st.plotly_chart(fig_corr)
 
         with tab4:
-            st.subheader("Justificativa Detalhada da Seleção (Top Picks)")
-            st.markdown("A pontuação de cada ativo é baseada no seu Z-Score em cada fator. **Scores positivos** indicam que o ativo está **melhor** do que a média de seus pares (setorial ou global).")
+            st.subheader("Justificativa Detalhada")
             
-            # Tabela de Score Detalhado
-            score_cols = ['Composite_Score', 'Sector'] + norm_cols
-            detailed_df = fundamentals_final.sort_values('Composite_Score', ascending=False).head(top_n)[score_cols]
+            # Prepara dados para exibição (ordena pelo score)
+            detailed_df = fundamentals_final.sort_values('Composite_Score', ascending=False).head(top_n)
             
-            st.dataframe(
-                detailed_df.style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']).format("{:.2f}"),
-                width='stretch'
-            )
-
-            # Detalhamento por Ticker
-            st.markdown("---")
             for ticker in detailed_df.index:
                 row = detailed_df.loc[ticker]
-                st.markdown(f"### 📈 {ticker} - Score: {row['Composite_Score']:.2f}")
-                st.markdown(f"**Setor:** {row['Sector']}")
+                st.markdown(f"### 📈 {ticker} - Score: {row.get('Composite_Score', 0):.2f}")
+                
+                # Check seguro para Sector
+                sector_val = row.get('Sector', 'N/A')
+                st.markdown(f"**Setor:** {sector_val}")
                 
                 justification = []
                 
-                # Fator 1: Momentum de Preço
-                score = row.get('Res_Mom_Z', 0)
-                if score > 0.5:
-                    justification.append(f"- **Residual Momentum ({score:.2f}):** Muito acima da média. A ação tem gerado forte **Alpha (retorno não explicado pelo mercado)** recentemente.")
-                elif score > 0.0:
-                    justification.append(f"- **Residual Momentum ({score:.2f}):** Acima da média. Forte sinal de que o preço superou o benchmark (BOVA11.SA).")
-                else:
-                    justification.append(f"- **Residual Momentum ({score:.2f}):** Abaixo ou na média. O preço não gerou Alpha significativo recentemente.")
+                # Helper para criar texto
+                def analyze_factor(factor_name, label_name, high_desc, low_desc):
+                    val = row.get(factor_name, 0)
+                    if pd.isna(val): return
+                    if val > 0.5: justification.append(f"- **{label_name} ({val:.2f}):** {high_desc}")
+                    elif val > 0.0: justification.append(f"- **{label_name} ({val:.2f}):** Acima da média.")
+                    else: justification.append(f"- **{label_name} ({val:.2f}):** {low_desc}")
 
-                # Fator 2: Momentum Fundamental
-                score = row.get('Fund_Mom_Z', 0)
-                if score > 0.5:
-                    justification.append(f"- **Fundamental Momentum ({score:.2f}):** Forte crescimento de Lucro/Receita (top do universo de comparação).")
-                elif score > 0.0:
-                    justification.append(f"- **Fundamental Momentum ({score:.2f}):** Crescimento acima da média do mercado.")
-                else:
-                    justification.append(f"- **Fundamental Momentum ({score:.2f}):** Crescimento de lucro/receita abaixo da média do mercado.")
-                    
-                # Fator 3: Valor (Setorial)
-                score = row.get('Value_Z', 0)
-                if score > 0.5:
-                    justification.append(f"- **Value (Valor) ({score:.2f}):** Extremamente barato em relação aos **pares do seu setor** (Altos 1/P/L e 1/P/VPA). Forte desconto.")
-                elif score > 0.0:
-                    justification.append(f"- **Value (Valor) ({score:.2f}):** Barato em relação à média setorial. Bom indicativo de preço atrativo.")
-                else:
-                    justification.append(f"- **Value (Valor) ({score:.2f}):** Preço na média ou ligeiramente caro em relação aos seus pares setoriais.")
-                    
-                # Fator 4: Qualidade (Setorial)
-                score = row.get('Quality_Z', 0)
-                if score > 0.5:
-                    justification.append(f"- **Quality (Qualidade) ({score:.2f}):** Alta eficiência (ROE e Margem) e baixa alavancagem em relação aos **pares do seu setor**.")
-                elif score > 0.0:
-                    justification.append(f"- **Quality (Qualidade) ({score:.2f}):** Qualidade (ROE, Margem, Dívida) acima da média setorial.")
-                else:
-                    justification.append(f"- **Quality (Qualidade) ({score:.2f}):** Qualidade (ROE, Margem, Dívida) na média ou ligeiramente abaixo da média setorial.")
+                analyze_factor('Res_Mom_Z', 'Momentum Preço', 'Forte tendência de alta vs Ibov.', 'Preço sem força relativa.')
+                analyze_factor('Fund_Mom_Z', 'Momentum Fundamental', 'Lucros/Receita acelerando forte.', 'Crescimento estagnado/negativo.')
+                analyze_factor('Value_Z', 'Valor (vs Setor)', 'Muito descontado (P/L e P/VP baixos).', 'Preço justo ou caro vs pares.')
+                analyze_factor('Quality_Z', 'Qualidade (vs Setor)', 'Alta eficiência (ROE) e solidez.', 'Qualidade na média ou abaixo.')
 
-                st.info("\n".join(justification))
-
+                st.info("\n".join(justification) if justification else "Sem dados suficientes para justificativa.")
 
 if __name__ == "__main__":
     main()
