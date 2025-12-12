@@ -27,7 +27,6 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
         t_list.append('BOVA11.SA')
     
     try:
-        # Puxa o histórico de preços ajustados
         data = yf.download(
             t_list, 
             start=start_date, 
@@ -44,7 +43,6 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
         st.error(f"Erro ao baixar preços: {e}")
         return pd.DataFrame()
 
-# Não atualizamos esta função pois o backtest mensal usará apenas preços
 @st.cache_data(ttl=3600*24)
 def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     """Busca snapshots fundamentais atuais."""
@@ -85,7 +83,6 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
     """Calcula Residual Momentum (Alpha) vs BOVA11.SA."""
     df = price_df.copy()
-    # Pega apenas os últimos preços do mês para cálculo de retorno
     monthly = df.resample('ME').last()
     rets = monthly.pct_change().dropna()
     
@@ -93,25 +90,21 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
         
     market = rets['BOVA11.SA']
     scores = {}
-    window = lookback + skip # Ex: 12 meses + 1 mês de skip
+    window = lookback + skip
     
     for ticker in rets.columns:
         if ticker == 'BOVA11.SA': continue
         
-        # Pega a janela de retornos e o benchmark correspondente
         y = rets[ticker].tail(window)
         x = market.tail(window)
         
         if len(y) < window: continue
             
         try:
-            # Regressão OLS: Retorno do Ativo = Alpha + Beta * Retorno do Mercado + Epsilon
             X = sm.add_constant(x.values)
             model = sm.OLS(y.values, X).fit()
-            # Resíduos são os 'alphas' mensais
-            resid = model.resid[:-skip] # Exclui o último mês para evitar look-ahead bias
+            resid = model.resid[:-skip]
             
-            # Residual Momentum é a soma normalizada dos resíduos
             if np.std(resid) == 0 or len(resid) < 2:
                 scores[ticker] = 0
             else:
@@ -156,7 +149,6 @@ def robust_zscore(series: pd.Series) -> pd.Series:
     median = series.median()
     mad = (series - median).abs().median()
     if mad == 0: return series - median
-    # Z-Score Robusto usa MAD (Median Absolute Deviation)
     z = (series - median) / (mad * 1.4826)
     return z.clip(-3, 3)
 
@@ -164,7 +156,6 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     """Calcula score final ponderado."""
     df = df_master.copy()
     df['Composite_Score'] = 0.0
-    # Soma ponderada dos Z-Scores
     for factor_col, weight in weights.items():
         if factor_col in df.columns:
             df['Composite_Score'] += df[factor_col].fillna(0) * weight
@@ -185,14 +176,13 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
         
         # 1. Calcular volatilidade histórica (3 meses / 63 dias)
         recent_rets = prices[selected].pct_change().tail(63)
-        # Volatilidade Anualizada
         vols = recent_rets.std() * (252**0.5)
         vols[vols == 0] = 1e-6 # Evita divisão por zero
         
-        # 2. Calcular Pesos de Risco Inverso (Proporcional ao inverso da Vol)
+        # 2. Calcular Pesos de Risco Inverso
         raw_weights_inv = 1 / vols
         
-        # 3. FORÇA A NORMALIZAÇÃO para 100%
+        # 3. FORÇA A NORMALIZAÇÃO para 100% (Desliga o dimensionamento absoluto do Vol Target)
         weights = raw_weights_inv / raw_weights_inv.sum() 
             
     else:
@@ -203,7 +193,7 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
 
 def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 252):
     """
-    Simula o desempenho do portfólio selecionado e do Benchmark no período dado (Backtest Simples).
+    Simula o desempenho do portfólio selecionado e do Benchmark.
     Retorna a Curva de Equity.
     """
     
@@ -217,11 +207,10 @@ def run_backtest(weights: pd.Series, prices: pd.DataFrame, lookback_days: int = 
     else:
         BVSP_ret = pd.Series(0, index=rets.index)
     
-    # 3. Retorno do Portfólio 
+    # 3. Retorno do Portfólio (Apenas se houver ativos válidos)
     valid_tickers = [t for t in weights.index if t in prices.columns]
     
     if valid_tickers:
-        # Produto escalar: Retorno Diário * Peso
         port_ret = rets[valid_tickers].dot(weights[valid_tickers].fillna(0))
     else:
         port_ret = pd.Series(0, index=rets.index)
@@ -249,6 +238,10 @@ def run_dca_backtest(
     """
     
     # 1. Configuração do Backtest
+    
+    # MELHORIA: Preenche NA's para frente para garantir que datas de rebalanceamento caiam em um preço
+    all_prices = all_prices.ffill() 
+    
     dca_start = start_date + timedelta(days=30) # Começa 1 mês depois do start_date para garantir dados de lookback
     dates = all_prices.loc[dca_start:end_date].resample('MS').first().index.tolist()
     
@@ -271,7 +264,6 @@ def run_dca_backtest(
         eval_date = month_start - timedelta(days=1)
         
         # Preços para cálculo do Momentum (13 meses antes do rebalanceamento)
-        # O Residual Momentum precisa de 12 meses + 1 de skip, então olhamos 13 meses antes.
         mom_start = month_start - timedelta(days=395) 
         prices_for_mom = all_prices.loc[mom_start:eval_date] 
         
@@ -318,21 +310,18 @@ def run_dca_backtest(
         
         # --- Passo B: Aporte e Compras ---
         
-        # Pega o preço de abertura do dia de rebalanceamento (primeiro preço do mês)
-        # Isso simula a compra na primeira oportunidade
-        rebal_price = all_prices.loc[month_start].to_frame().T
-        
+        # CORREÇÃO: Garante que pegamos o primeiro preço de negociação no ou após o month_start
+        try:
+            # Seleciona todas as linhas no ou após month_start e pega a primeira (iloc[0])
+            rebal_price = all_prices.loc[all_prices.index >= month_start].iloc[0].to_frame().T
+        except IndexError:
+            # Se não houver mais dados no período, para o loop
+            break
+            
         # 1. Estratégia (Aporte + Rebalanceamento)
         
         # Aporte de R$1000
         cash_for_strategy = dca_amount 
-        
-        # Itera sobre os ativos selecionados para comprar
-        current_holdings = {t: q for t, q in portfolio_holdings.items() if q > 0}
-        
-        # Novos e antigos ativos que terão um peso desejado > 0
-        all_rebal_tickers = list(set(current_weights.index.tolist() + list(current_holdings.keys())))
-        
         
         # 2. Benchmark (Aporte)
         
@@ -344,7 +333,7 @@ def run_dca_backtest(
             q_bova = dca_amount / bova_price
             benchmark_holdings['BOVA11.SA'] += q_bova
             monthly_transactions.append({
-                'Date': month_start,
+                'Date': rebal_price.index[0], # Usa a data efetiva de rebal
                 'Ticker': 'BOVA11.SA',
                 'Action': 'Buy (DCA)',
                 'Quantity': q_bova,
@@ -370,7 +359,7 @@ def run_dca_backtest(
                     buy_value += amount
                     
                     monthly_transactions.append({
-                        'Date': month_start,
+                        'Date': rebal_price.index[0], # Usa a data efetiva de rebal
                         'Ticker': ticker,
                         'Action': 'Buy (DCA)',
                         'Quantity': quantity,
@@ -382,7 +371,7 @@ def run_dca_backtest(
         
         # Último dia do mês para o valor final antes do rebalanceamento
         next_month_start = dates[i+1] if i < len(dates) - 1 else end_date
-        valuation_dates = all_prices.loc[month_start:next_month_start].index
+        valuation_dates = all_prices.loc[rebal_price.index[0]:next_month_start].index # Começa da data de compra
         
         # Simulação dia-a-dia da valorização
         for current_date in valuation_dates:
@@ -511,7 +500,7 @@ def main():
             # 3. Executa Backtest DCA
             dca_curve, dca_transactions = run_dca_backtest(
                 prices,
-                fundamentals, # Uso de fundamentos estáticos para simplificação
+                fundamentals, 
                 weights_dict_dca,
                 top_n,
                 dca_amount,
@@ -561,7 +550,6 @@ def main():
             st.subheader("Performance Recente (Simulação de 1 Ano)")
             
             if not weights.empty:
-                # O Backtest Simples usa apenas o último conjunto de pesos
                 curve = run_backtest(weights, prices, lookback_days=252)
                 
                 if not curve.empty and len(curve) > 1:
@@ -603,7 +591,6 @@ def main():
                 
                 # CÁLCULO DAS MÉTRICAS DCA
                 
-                # Último valor e valor inicial (que deve ser 0 para DCA)
                 final_strat_value = dca_curve['Strategy_DCA'].iloc[-1]
                 final_bench_value = dca_curve['BOVA11.SA_DCA'].iloc[-1]
                 
