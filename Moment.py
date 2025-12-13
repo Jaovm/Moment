@@ -45,9 +45,51 @@ def fetch_price_data(tickers: list, start_date: str, end_date: str) -> pd.DataFr
 
 @st.cache_data(ttl=3600*24)
 def fetch_fundamentals(tickers: list) -> pd.DataFrame:
-    """Busca snapshots fundamentais atuais."""
+    """
+    Busca snapshots fundamentais atuais e aplica mapeamento de setor para 
+    Neutralidade Setorial mais realista.
+    """
     data = []
     clean_tickers = [t for t in tickers if t != 'BOVA11.SA']
+    
+    # --- Mapeamento de Setores (CORREÇÃO DE NOMENCLATURA) ---
+    # O YFinance usa categorias amplas. Aqui, refinamos para subgrupos mais homogêneos.
+    def get_refined_sector(info, ticker):
+        sector = info.get('sector', 'Unknown')
+        long_name = info.get('longName', '')
+        
+        # Utilities
+        if sector == 'Utilities':
+             if 'Transmissão' in long_name or 'TAEE' in ticker:
+                 return 'Utilities - Transmission'
+             return 'Utilities - Generation/Others'
+
+        # Financial Services
+        if sector == 'Financial Services':
+            if 'Banco' in long_name or 'ITUB' in ticker or 'BBAS' in ticker:
+                return 'Financial Services - Banking'
+            if 'Seguros' in long_name or 'Seguradora' in long_name or 'BBSE' in ticker or 'PSSA' in ticker:
+                return 'Financial Services - Insurance'
+            if 'Bolsa' in long_name or 'B3' in ticker:
+                return 'Financial Services - Capital Markets'
+            return 'Financial Services - Others'
+        
+        # Real Estate
+        if sector == 'Real Estate':
+            return 'Real Estate'
+        
+        # Industrial
+        if sector == 'Industrials':
+            if 'Transporte' in long_name or 'Logística' in long_name:
+                return 'Industrials - Logistics'
+            return 'Industrials - Mfg/Capital Goods'
+            
+        # Telecom Services
+        if sector == 'Communication Services':
+            return 'Telecom'
+        
+        return sector # Retorna o setor original se não houver mapeamento
+
     
     progress_bar = st.progress(0)
     total = len(clean_tickers)
@@ -55,15 +97,13 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     for i, t in enumerate(clean_tickers):
         try:
             info = yf.Ticker(t).info
-            sector = info.get('sector', 'Unknown')
-            # Tratamento para setores desconhecidos
-            if sector in ['Unknown', 'N/A'] and 'longName' in info:
-                 if 'Banco' in info['longName'] or 'Financeira' in info['longName']:
-                     sector = 'Financial Services'
+            
+            # Aplica o mapeamento
+            refined_sector = get_refined_sector(info, t)
             
             data.append({
                 'ticker': t,
-                'sector': sector,
+                'sector': refined_sector,
                 'forwardPE': info.get('forwardPE', np.nan),
                 'priceToBook': info.get('priceToBook', np.nan),
                 'enterpriseToEbitda': info.get('enterpriseToEbitda', np.nan),
@@ -195,7 +235,7 @@ def run_rolling_1yr_backtest(
     top_n: int, 
     use_vol_target: bool,
     use_sector_neutrality: bool,
-    tickers_trade: list # NOVO PARÂMETRO
+    tickers_trade: list
 ):
     """
     Executa um backtest mês a mês (Walk-Forward) para os últimos 12 meses.
@@ -225,7 +265,6 @@ def run_rolling_1yr_backtest(
         res_mom = compute_residual_momentum(mom_window)
         
         # 3. Scores (Fundamentos estáticos por limitação do yfinance free)
-        # Usa todos os fundamentos (trade + ref)
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
@@ -322,7 +361,7 @@ def run_dca_backtest(
     use_sector_neutrality: bool, 
     start_date: datetime,
     end_date: datetime,
-    tickers_trade: list # NOVO PARÂMETRO
+    tickers_trade: list
 ):
     """Simula um Backtest com Aportes Mensais (DCA) e rebalanceamento."""
     
@@ -476,8 +515,8 @@ def main():
     reference_tickers = [
         'ELET3.SA', 'AURE3.SA', 'ENBR3.SA', 'CPFE3.SA', 'EQTL3.SA', # Energia
         'CSMG3.SA', # Saneamento
-        'SANB11.SA', 'ABCB4.SA', # Outros Financeiros
-        'RENT3.SA', 'LREN3.SA' # Varejo/Tecnologia
+        'SANB11.SA', 'BBDC4.SA', # Outros Financeiros
+        'RENT3.SA', 'LREN3.SA', 'MGLU3.SA' # Varejo/Tecnologia
     ]
     # Cria a lista de todos os tickers para busca (original + referência), sem duplicatas
     all_tickers = list(set(tickers + reference_tickers))
@@ -515,6 +554,7 @@ def main():
             
             # MUDANÇA: Usar 'all_tickers' para busca de dados
             prices = fetch_price_data(all_tickers, start_date, end_date)
+            # MUDANÇA CRÍTICA: 'fetch_fundamentals' agora mapeia os setores
             fundamentals = fetch_fundamentals(all_tickers) 
             
             if prices.empty or fundamentals.empty:
@@ -546,7 +586,7 @@ def main():
             weights_map = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             weights_keys = {}
 
-            # Normalização (usa todos os ativos para o Z-Score Setorial)
+            # Normalização (usa todos os ativos para o Z-Score Setorial com as novas classes)
             if use_sector_neutrality and 'Sector' in df_master.columns and df_master['Sector'].nunique() > 1:
                 for c in norm_cols:
                     if c in df_master.columns:
@@ -656,7 +696,6 @@ def main():
 
         with tab4:
             st.subheader("Correlação e Dados")
-            # A correlação ainda é calculada no df_master completo
             if cols_show:
                 corr = final_df[cols_show].corr()
                 st.plotly_chart(px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r'), use_container_width=True)
