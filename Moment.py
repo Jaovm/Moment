@@ -194,7 +194,8 @@ def run_rolling_1yr_backtest(
     weights_config: dict, 
     top_n: int, 
     use_vol_target: bool,
-    use_sector_neutrality: bool
+    use_sector_neutrality: bool,
+    tickers_trade: list # NOVO PARÂMETRO
 ):
     """
     Executa um backtest mês a mês (Walk-Forward) para os últimos 12 meses.
@@ -224,6 +225,7 @@ def run_rolling_1yr_backtest(
         res_mom = compute_residual_momentum(mom_window)
         
         # 3. Scores (Fundamentos estáticos por limitação do yfinance free)
+        # Usa todos os fundamentos (trade + ref)
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
@@ -240,7 +242,7 @@ def run_rolling_1yr_backtest(
         
         df_period.dropna(thresh=2, inplace=True)
         
-        # 5. Normalização (Sector Neutral ou Global)
+        # 5. Normalização (Sector Neutral ou Global) - Usa todos os ativos para o Z-Score
         norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
         w_keys = {}
         
@@ -261,15 +263,18 @@ def run_rolling_1yr_backtest(
                     
         ranked_period = build_composite_score(df_period, w_keys)
         
-        # 6. Portfólio do Mês
+        # 6. FILTRAGEM CRÍTICA: Manter apenas os ativos do universo de trade
+        ranked_period_trade = ranked_period[ranked_period.index.isin(tickers_trade)]
+        
+        # 7. Portfólio do Mês
         current_weights = construct_portfolio(
-            ranked_period, 
+            ranked_period_trade, # USAR O DF FILTRADO
             risk_window, 
             top_n, 
             0.15 if use_vol_target else None
         )
         
-        # 7. Retornos no próximo mês
+        # 8. Retornos no próximo mês
         market_period = subset_prices.loc[rebal_date:next_date].iloc[1:] 
         period_pct = market_period.pct_change().dropna()
         
@@ -316,7 +321,8 @@ def run_dca_backtest(
     use_vol_target: bool,
     use_sector_neutrality: bool, 
     start_date: datetime,
-    end_date: datetime
+    end_date: datetime,
+    tickers_trade: list # NOVO PARÂMETRO
 ):
     """Simula um Backtest com Aportes Mensais (DCA) e rebalanceamento."""
     
@@ -342,13 +348,13 @@ def run_dca_backtest(
         risk_start = month_start - timedelta(days=90)
         prices_for_risk = all_prices.loc[risk_start:eval_date]
         
-        # 1. Recalcula Fatores
+        # 1. Recalcula Fatores (Usa todos os tickers)
         if not prices_for_mom.empty:
             res_mom = compute_residual_momentum(prices_for_mom)
         else:
             res_mom = pd.Series(dtype=float)
         
-        # Fundamentos estáticos
+        # Fundamentos estáticos (Usa todos os tickers)
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
@@ -363,7 +369,7 @@ def run_dca_backtest(
              df_master['Sector'] = all_fundamentals['sector']
         df_master.dropna(thresh=2, inplace=True)
         
-        # 2. Normalização e Ranking
+        # 2. Normalização e Ranking (Usa todos os tickers para Z-Score Setorial)
         norm_cols_dca = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
         weights_keys = {}
         
@@ -383,7 +389,11 @@ def run_dca_backtest(
                     weights_keys[new_col] = factor_weights.get(c, 0.0)
 
         final_df = build_composite_score(df_master, weights_keys)
-        current_weights = construct_portfolio(final_df, prices_for_risk, top_n, 0.15 if use_vol_target else None)
+        
+        # FILTRAGEM CRÍTICA: Manter apenas os ativos do universo de trade
+        final_df_trade = final_df[final_df.index.isin(tickers_trade)]
+        
+        current_weights = construct_portfolio(final_df_trade, prices_for_risk, top_n, 0.15 if use_vol_target else None)
         
         # --- B. Aporte ---
         try:
@@ -461,7 +471,17 @@ def main():
     default_univ = "ITUB3.SA, TOTS3.SA, MDIA3.SA, TAEE3.SA, BBSE3.SA, WEGE3.SA, PSSA3.SA, EGIE3.SA, B3SA3.SA, VIVT3.SA, AGRO3.SA, PRIO3.SA, BBAS3.SA, BPAC11.SA, SBSP3.SA, SAPR4.SA, CMIG3.SA, UNIP6.SA, FRAS3.SA"
     ticker_input = st.sidebar.text_area("Tickers (Separados por vírgula)", default_univ, height=100)
     tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
-
+    
+    # NOVOS TICKERS DE REFERÊNCIA HARDCODED PARA MELHOR NEUTRALIDADE SETORIAL
+    reference_tickers = [
+        'ELET3.SA', 'AURE3.SA', 'ENBR3.SA', 'CPFE3.SA', 'EQTL3.SA', # Energia
+        'CSMG3.SA', # Saneamento
+        'SANB11.SA', 'ABCB4.SA', # Outros Financeiros
+        'RENT3.SA', 'LREN3.SA' # Varejo/Tecnologia
+    ]
+    # Cria a lista de todos os tickers para busca (original + referência), sem duplicatas
+    all_tickers = list(set(tickers + reference_tickers))
+    
     st.sidebar.header("2. Pesos dos Fatores (Alpha)")
     w_rm = st.sidebar.slider("Residual Momentum", 0.0, 1.0, 0.40)
     w_fm = st.sidebar.slider("Fundamental Momentum", 0.0, 1.0, 0.20)
@@ -492,8 +512,10 @@ def main():
         with st.status("Executando Pipeline Quant...", expanded=True) as status:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=365 * (dca_years + 1)) 
-            prices = fetch_price_data(tickers, start_date, end_date)
-            fundamentals = fetch_fundamentals(tickers) 
+            
+            # MUDANÇA: Usar 'all_tickers' para busca de dados
+            prices = fetch_price_data(all_tickers, start_date, end_date)
+            fundamentals = fetch_fundamentals(all_tickers) 
             
             if prices.empty or fundamentals.empty:
                 st.error("Dados insuficientes.")
@@ -501,12 +523,14 @@ def main():
                 return
             
             # --- CÁLCULO ATUAL (Para Tab 1) ---
+            # Usa 'prices' e 'fundamentals' que contêm todos os ativos (trade + ref)
             res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals)
             val_score = compute_value_score(fundamentals)
             qual_score = compute_quality_score(fundamentals)
 
-            df_master = pd.DataFrame(index=tickers)
+            # MUDANÇA: Criar df_master com todos os tickers
+            df_master = pd.DataFrame(index=all_tickers)
             df_master['Res_Mom'] = res_mom
             df_master['Fund_Mom'] = fund_mom
             df_master['Value'] = val_score
@@ -522,6 +546,7 @@ def main():
             weights_map = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             weights_keys = {}
 
+            # Normalização (usa todos os ativos para o Z-Score Setorial)
             if use_sector_neutrality and 'Sector' in df_master.columns and df_master['Sector'].nunique() > 1:
                 for c in norm_cols:
                     if c in df_master.columns:
@@ -540,18 +565,25 @@ def main():
                         cols_show.append(new_col)
             
             final_df = build_composite_score(df_master, weights_keys)
-            weights = construct_portfolio(final_df, prices, top_n, target_vol)
+            
+            # MUDANÇA CRÍTICA: Filtrar para apenas os tickers negociáveis antes do Top N
+            final_df_trade = final_df[final_df.index.isin(tickers)]
+            
+            # Usar ranking filtrado para pesos e Top N
+            weights = construct_portfolio(final_df_trade, prices, top_n, target_vol)
             
             # --- BACKTEST DINÂMICO 1 ANO (Para Tab 2) ---
             backtest_1yr = run_rolling_1yr_backtest(
-                prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality
+                prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality,
+                tickers_trade=tickers # NOVO PARÂMETRO
             )
 
             # --- BACKTEST DCA (Para Tab 3) ---
             dca_curve, dca_transactions = run_dca_backtest(
                 prices, fundamentals, weights_map, top_n, dca_amount,
                 use_vol_target, use_sector_neutrality, 
-                end_date - timedelta(days=365 * dca_years), end_date
+                end_date - timedelta(days=365 * dca_years), end_date,
+                tickers_trade=tickers # NOVO PARÂMETRO
             )
 
             status.update(label="Concluído!", state="complete", expanded=False)
@@ -566,9 +598,10 @@ def main():
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("Top Picks (Score Atual)")
+                # Exibe apenas os tickers negociáveis
                 show_list = ['Composite_Score', 'Sector'] + cols_show
                 st.dataframe(
-                    final_df[show_list].head(top_n).style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
+                    final_df_trade[show_list].head(top_n).style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
                     height=400, width=1000
                 )
             with col2:
@@ -623,9 +656,12 @@ def main():
 
         with tab4:
             st.subheader("Correlação e Dados")
+            # A correlação ainda é calculada no df_master completo
             if cols_show:
                 corr = final_df[cols_show].corr()
                 st.plotly_chart(px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r'), use_container_width=True)
+            
+            st.subheader("Fundamentos (Universo Completo)")
             st.dataframe(fundamentals)
 
 if __name__ == "__main__":
