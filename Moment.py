@@ -59,7 +59,7 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
         ticker_base = ticker.split('.')[0]
         
         # --- 1. ENERGY (Oil & Gas e Renováveis) ---
-        if sector == 'Energy' or ticker_base in ['PRIO3', 'PETR4', 'PETR3', 'ENAT3']:
+        if sector == 'Energy' or ticker_base in ['PRIO3', 'PETR4', 'PETR3', 'ENAT3', 'RRRP3']:
             if 'RENOVÁVEIS' in long_name or 'RENEWABLE' in long_name:
                 return 'Energy - Renewables'
             return 'Energy - Oil & Gas' # Inclui PRIO3
@@ -69,8 +69,8 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
             # 2a. Sanitation (SBSP3, SAPR4, CSMG3)
             if 'SANEAMENTO' in long_name or ticker_base in ['SBSP3', 'SAPR4', 'CSMG3']:
                  return 'Utilities - Sanitation'
-            # 2b. Electric Transmission (TAEE3)
-            elif 'TRANSMISSÃO' in long_name or ticker_base in ['TAEE3']:
+            # 2b. Electric Transmission (TAEE3, TRPL4)
+            elif 'TRANSMISSÃO' in long_name or ticker_base in ['TAEE3', 'TRPL4']:
                  return 'Utilities - Electric Transmission'
             # 2c. Electric Generation/Distribution
             else:
@@ -78,31 +78,54 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
         
         # --- 3. FINANCIAL SERVICES ---
         if sector == 'Financial Services':
-            if 'BANCO' in long_name or ticker_base in ['ITUB3', 'BBAS3', 'BBDC4', 'SANB11']:
+            if 'BANCO' in long_name or ticker_base in ['ITUB3', 'BBAS3', 'BBDC4', 'SANB11', 'BPAN4']:
                 return 'Financial Services - Banking'
             if 'SEGUROS' in long_name or 'PREVIDÊNCIA' in long_name or ticker_base in ['BBSE3', 'PSSA3']:
                 return 'Financial Services - Insurance'
-            if 'BOLSA' in long_name or 'CORRETORA' in long_name or ticker_base in ['B3SA3', 'BPAC11']:
+            if 'BOLSA' in long_name or 'CORRETORA' in long_name or ticker_base in ['B3SA3', 'BPAC11', 'CIEL3']:
                 return 'Financial Services - Capital Markets'
             return 'Financial Services - Others'
         
         # --- 4. TECHNOLOGY/SOFTWARE ---
-        if sector == 'Technology':
+        if sector == 'Technology' or ticker_base in ['TOTS3']:
             return 'Technology - Software/IT' # Inclui TOTS3
         
         # --- 5. CONSUMER CYCLICAL ---
         if sector == 'Consumer Cyclical':
-            if 'VAREJO' in long_name or ticker_base in ['MGLU3', 'LREN3', 'RENT3']:
+            if 'VAREJO' in long_name or ticker_base in ['MGLU3', 'LREN3', 'ASAI3', 'PCAR3', 'AMER3']:
                  return 'Consumer Cyclical - Retail/E-commerce'
-            return 'Consumer Cyclical - Others' # Ex: Construção, Turismo
+            if 'ALUGUEL' in long_name or 'RENT' in long_name or ticker_base in ['RENT3']:
+                 return 'Consumer Cyclical - Rental/Services'
+            return 'Consumer Cyclical - Others' # Ex: Construção, Turismo (CVCB3)
         
         # --- 6. INDUSTRIAL/CAPITAL GOODS ---
         if sector == 'Industrials':
-            if 'LOGÍSTICA' in long_name or 'TRANSPORTE' in long_name or ticker_base in ['RAIL3']:
+            if 'LOGÍSTICA' in long_name or 'TRANSPORTE' in long_name or ticker_base in ['RAIL3', 'RUMO3', 'AZUL4']:
                 return 'Industrials - Logistics/Transport'
-            return 'Industrials - Mfg/Capital Goods' # Inclui WEGE3, FRAS3
+            return 'Industrials - Mfg/Capital Goods' # Inclui WEGE3, FRAS3, EMBR3
             
-        # --- 7. OTHERS ---
+        # --- 7. BASIC MATERIALS ---
+        if sector == 'Basic Materials':
+            if ticker_base in ['VALE3', 'CSNA3', 'GGBR4']:
+                return 'Basic Materials - Metals & Mining'
+            return 'Basic Materials - Others' # Inclui UNIP6
+        
+        # --- 8. COMMUNICATION SERVICES ---
+        if sector == 'Communication Services':
+            return 'Telecom' # Inclui VIVT3
+            
+        # --- 9. HEALTHCARE ---
+        if sector == 'Healthcare':
+            return 'Healthcare'
+            
+        # --- 10. REAL ESTATE ---
+        if sector == 'Real Estate':
+            return 'Real Estate'
+        
+        # --- 11. AGRICULTURAL ---
+        if sector == 'Agriculture' or ticker_base in ['AGRO3']:
+             return 'Agriculture'
+        
         return sector # Retorna o setor original se não houver mapeamento
 
     
@@ -144,6 +167,11 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
 def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd.Series:
     """Calcula Residual Momentum (Alpha) vs BOVA11.SA."""
     df = price_df.copy()
+    
+    # Assegura que há dados suficientes para 12+1 meses
+    if len(df.resample('ME').last()) < lookback + skip:
+         return pd.Series(dtype=float)
+         
     monthly = df.resample('ME').last()
     rets = monthly.pct_change().dropna()
     
@@ -153,24 +181,34 @@ def compute_residual_momentum(price_df: pd.DataFrame, lookback=12, skip=1) -> pd
     scores = {}
     window = lookback + skip
     
+    # Tenta usar apenas os últimos `window` retornos
     for ticker in rets.columns:
         if ticker == 'BOVA11.SA': continue
         
+        # Pega as últimas janelas de retorno
         y = rets[ticker].tail(window)
         x = market.tail(window)
         
-        if len(y) < window: continue
+        # CRÍTICO: Se faltar dados em y ou x, pula este ticker
+        if len(y) < window or len(x) < window: continue
             
         try:
-            X = sm.add_constant(x.values)
-            model = sm.OLS(y.values, X).fit()
+            # Garante que X e Y têm o mesmo índice/comprimento após tail
+            x_values = x.values
+            y_values = y.values
+            
+            X = sm.add_constant(x_values)
+            model = sm.OLS(y_values, X).fit()
+            # Pega o resíduo do lookback (excluindo o skip)
             resid = model.resid[:-skip]
             
-            if np.std(resid) == 0 or len(resid) < 2:
+            if len(resid) < 2 or np.std(resid) == 0:
                 scores[ticker] = 0
             else:
+                # Soma dos resíduos dividida pelo desvio-padrão dos resíduos (Residual Momentum)
                 scores[ticker] = np.sum(resid) / np.std(resid)
-        except:
+        except Exception as e:
+            # st.warning(f"Erro no Residual Momentum para {ticker}: {e}") # Debugging
             scores[ticker] = 0
             
     return pd.Series(scores, name='Residual_Momentum')
@@ -217,9 +255,14 @@ def build_composite_score(df_master: pd.DataFrame, weights: dict) -> pd.DataFram
     """Calcula score final ponderado."""
     df = df_master.copy()
     df['Composite_Score'] = 0.0
-    for factor_col, weight in weights.items():
-        if factor_col in df.columns:
-            df['Composite_Score'] += df[factor_col].fillna(0) * weight
+    
+    # CRÍTICO: Filtra as colunas do df que realmente existem
+    valid_factors = [col for col, weight in weights.items() if col in df.columns]
+
+    for factor_col in valid_factors:
+        weight = weights[factor_col]
+        # Garante que os valores NaN nos Z-Scores (onde o cálculo setorial falhou) são 0
+        df['Composite_Score'] += df[factor_col].fillna(0) * weight
             
     return df.sort_values('Composite_Score', ascending=False)
 
@@ -233,12 +276,14 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
     if not selected: return pd.Series()
 
     if vol_target is not None:
-        recent_rets = prices[selected].pct_change().tail(63)
+        # Ponderação por Risco Inverso (Volatilidade Recente)
+        recent_rets = prices[selected].pct_change().tail(63) # 3 meses aprox.
         vols = recent_rets.std() * (252**0.5)
         vols[vols == 0] = 1e-6 
         raw_weights_inv = 1 / vols
         weights = raw_weights_inv / raw_weights_inv.sum() 
     else:
+        # Ponderação Igual
         weights = pd.Series(1.0/len(selected), index=selected)
         
     return weights
@@ -256,23 +301,40 @@ def run_rolling_1yr_backtest(
     Executa um backtest mês a mês (Walk-Forward) para os últimos 12 meses.
     """
     end_date = all_prices.index[-1]
+    # Inicia o backtest 1 ano atrás
     start_date = end_date - timedelta(days=365)
     
-    # Pega um buffer histórico para cálculo de momentum
+    # Pega um buffer histórico para cálculo de momentum (16 meses)
     subset_prices = all_prices.loc[start_date - timedelta(days=400):end_date]
+
+    # CRÍTICO: Assegura que há um mínimo de histórico para começar o backtest
+    if subset_prices.empty or subset_prices.index.max() < start_date:
+        return pd.DataFrame()
+
     rebalance_dates = subset_prices.loc[start_date:end_date].resample('MS').first().index.tolist()
     
-    if not rebalance_dates:
+    if len(rebalance_dates) < 2:
         return pd.DataFrame()
 
     strategy_daily_rets = []
     benchmark_daily_rets = []
+    
+    # Mapeamento para evitar NameError com eval
+    weights_map = {'Res_Mom': weights_config.get('Residual Momentum', 0.0), 
+                   'Fund_Mom': weights_config.get('Fundamental Momentum', 0.0), 
+                   'Value': weights_config.get('Value', 0.0), 
+                   'Quality': weights_config.get('Quality', 0.0)}
 
     for i, rebal_date in enumerate(rebalance_dates):
+        # Data de fim do mês de holding
         next_date = rebalance_dates[i+1] if i < len(rebalance_dates) - 1 else end_date
         
         # 1. Dados até a data de rebalanceamento (Simula o passado)
-        prices_historical = subset_prices.loc[:rebal_date]
+        prices_historical = subset_prices.loc[:rebal_date].ffill().dropna(how='all')
+        
+        # O histórico deve ter pelo menos 16 meses de dados para calcular o momentum
+        if len(prices_historical.resample('ME').last()) < 16:
+             continue
         
         # 2. Recalcula Momentum
         mom_window = prices_historical.tail(400) 
@@ -285,7 +347,11 @@ def run_rolling_1yr_backtest(
         qual_score = compute_quality_score(all_fundamentals)
         
         # 4. DataFrame do Mês
-        df_period = pd.DataFrame(index=all_prices.columns.drop('BOVA11.SA', errors='ignore'))
+        # Inclui todos os tickers (trade + ref) para o cálculo do Z-Score
+        all_tickers_current = prices_historical.columns.drop('BOVA11.SA', errors='ignore')
+        df_period = pd.DataFrame(index=all_tickers_current)
+        
+        # CRÍTICO: Alinha apenas os tickers que têm Residual Momentum calculado neste mês
         df_period['Res_Mom'] = res_mom
         df_period['Fund_Mom'] = fund_mom
         df_period['Value'] = val_score
@@ -294,9 +360,9 @@ def run_rolling_1yr_backtest(
         if 'sector' in all_fundamentals.columns: 
              df_period['Sector'] = all_fundamentals['sector']
         
-        df_period.dropna(thresh=2, inplace=True)
+        df_period.dropna(thresh=2, inplace=True) # Remove linhas onde quase todos os fatores são NaN
         
-        # 5. Normalização (Sector Neutral ou Global) - Usa todos os ativos para o Z-Score
+        # 5. Normalização (Sector Neutral ou Global) 
         norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
         w_keys = {}
         
@@ -304,25 +370,32 @@ def run_rolling_1yr_backtest(
             for c in norm_cols:
                 if c in df_period.columns:
                     new_col = f"{c}_Z"
+                    # CRÍTICO: O transform só funciona se o grupo tiver mais de 1 elemento.
+                    # A robust_zscore lida com grupos de tamanho 1.
                     df_period[new_col] = df_period.groupby('Sector')[c].transform(
-                         lambda x: robust_zscore(x) if len(x) > 1 else x - x.median()
+                         lambda x: robust_zscore(x) 
                     )
-                    w_keys[new_col] = weights_config.get(c, 0.0)
+                    w_keys[new_col] = weights_map.get(c, 0.0)
         else:
             for c in norm_cols:
                 if c in df_period.columns:
                     new_col = f"{c}_Z"
                     df_period[new_col] = robust_zscore(df_period[c])
-                    w_keys[new_col] = weights_config.get(c, 0.0)
+                    w_keys[new_col] = weights_map.get(c, 0.0)
                     
+        # Remove NaNs resultantes de Z-Score com grupo de 0-1 elemento
+        df_period.dropna(subset=w_keys.keys(), how='all', inplace=True) 
+        
         ranked_period = build_composite_score(df_period, w_keys)
         
         # 6. FILTRAGEM CRÍTICA: Manter apenas os ativos do universo de trade
         ranked_period_trade = ranked_period[ranked_period.index.isin(tickers_trade)]
         
+        if ranked_period_trade.empty: continue # Pula o mês se não houver ativos para negociar
+            
         # 7. Portfólio do Mês
         current_weights = construct_portfolio(
-            ranked_period_trade, # USAR O DF FILTRADO
+            ranked_period_trade, 
             risk_window, 
             top_n, 
             0.15 if use_vol_target else None
@@ -334,9 +407,11 @@ def run_rolling_1yr_backtest(
         
         if period_pct.empty: continue
             
+        # Garante que as colunas da estratégia e do retorno existem no período
         valid_tickers = [t for t in current_weights.index if t in period_pct.columns]
         
         if valid_tickers:
+            # Pondera os retornos do período com os pesos calculados
             strat_ret = period_pct[valid_tickers].dot(current_weights[valid_tickers])
         else:
             strat_ret = pd.Series(0.0, index=period_pct.index)
@@ -364,6 +439,7 @@ def run_rolling_1yr_backtest(
         })
         return cumulative.dropna()
     else:
+        # Retorna DataFrame vazio se o loop não gerar nenhum retorno válido
         return pd.DataFrame()
 
 def run_dca_backtest(
@@ -394,26 +470,30 @@ def run_dca_backtest(
     benchmark_holdings = {'BOVA11.SA': 0.0}
     monthly_transactions = []
     
+    # Mapeamento para evitar NameError com eval
+    weights_map = {'Res_Mom': factor_weights.get('Residual Momentum', 0.0), 
+                   'Fund_Mom': factor_weights.get('Fundamental Momentum', 0.0), 
+                   'Value': factor_weights.get('Value', 0.0), 
+                   'Quality': factor_weights.get('Quality', 0.0)}
+
     for i, month_start in enumerate(dates):
         # --- A. Avaliação ---
         eval_date = month_start - timedelta(days=1)
         mom_start = month_start - timedelta(days=395) 
-        prices_for_mom = all_prices.loc[mom_start:eval_date] 
+        prices_for_mom = all_prices.loc[mom_start:eval_date].ffill().dropna(how='all')
         risk_start = month_start - timedelta(days=90)
         prices_for_risk = all_prices.loc[risk_start:eval_date]
         
         # 1. Recalcula Fatores (Usa todos os tickers)
-        if not prices_for_mom.empty:
-            res_mom = compute_residual_momentum(prices_for_mom)
-        else:
-            res_mom = pd.Series(dtype=float)
+        res_mom = compute_residual_momentum(prices_for_mom)
         
         # Fundamentos estáticos (Usa todos os tickers)
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
 
-        df_master = pd.DataFrame(index=all_prices.columns.drop('BOVA11.SA', errors='ignore'))
+        all_tickers_current = prices_for_mom.columns.drop('BOVA11.SA', errors='ignore')
+        df_master = pd.DataFrame(index=all_tickers_current)
         df_master['Res_Mom'] = res_mom
         df_master['Fund_Mom'] = fund_mom
         df_master['Value'] = val_score
@@ -432,21 +512,26 @@ def run_dca_backtest(
                 if c in df_master.columns:
                     new_col = f"{c}_Z_Sector"
                     df_master[new_col] = df_master.groupby('Sector')[c].transform(
-                        lambda x: robust_zscore(x) if len(x) > 1 else x - x.median() 
+                        lambda x: robust_zscore(x) 
                     )
-                    weights_keys[new_col] = factor_weights.get(c, 0.0)
+                    weights_keys[new_col] = weights_map.get(c, 0.0)
         else:
             for c in norm_cols_dca:
                 if c in df_master.columns:
                     new_col = f"{c}_Z"
                     df_master[new_col] = robust_zscore(df_master[c])
-                    weights_keys[new_col] = factor_weights.get(c, 0.0)
+                    weights_keys[new_col] = weights_map.get(c, 0.0)
 
+        # Remove NaNs resultantes de Z-Score com grupo de 0-1 elemento
+        df_master.dropna(subset=weights_keys.keys(), how='all', inplace=True)
+        
         final_df = build_composite_score(df_master, weights_keys)
         
         # FILTRAGEM CRÍTICA: Manter apenas os ativos do universo de trade
         final_df_trade = final_df[final_df.index.isin(tickers_trade)]
         
+        if final_df_trade.empty: continue # Pula o mês se não houver ativos para negociar
+            
         current_weights = construct_portfolio(final_df_trade, prices_for_risk, top_n, 0.15 if use_vol_target else None)
         
         # --- B. Aporte ---
@@ -454,6 +539,9 @@ def run_dca_backtest(
             rebal_price = all_prices.loc[all_prices.index >= month_start].iloc[0].to_frame().T
         except IndexError:
             break
+            
+        # Pula se o preço de rebalanceamento não estiver disponível
+        if rebal_price.empty: continue
             
         cash_for_strategy = dca_amount 
         
@@ -492,14 +580,18 @@ def run_dca_backtest(
         next_month_start = dates[i+1] if i < len(dates) - 1 else end_date
         valuation_dates = all_prices.loc[rebal_price.index[0]:next_month_start].index
         
+        # Valoriza a partir do dia de rebalanceamento
         for current_date in valuation_dates:
             current_port_value = 0.0
+            
+            # Valor Estratégia
             for ticker, quantity in portfolio_holdings.items():
-                if ticker in all_prices.columns and current_date in all_prices.index:
+                if ticker in all_prices.columns and current_date in all_prices.index and not np.isnan(all_prices.loc[current_date, ticker]):
                     price = all_prices.loc[current_date, ticker]
                     current_port_value += price * quantity
             portfolio_value[current_date] = current_port_value
             
+            # Valor Benchmark
             price_bova = all_prices.loc[current_date, 'BOVA11.SA']
             benchmark_value[current_date] = price_bova * benchmark_holdings['BOVA11.SA']
         
@@ -556,6 +648,8 @@ def main():
     w_fm = st.sidebar.slider("Fundamental Momentum", 0.0, 1.0, 0.20)
     w_val = st.sidebar.slider("Value", 0.0, 1.0, 0.20)
     w_qual = st.sidebar.slider("Quality", 0.0, 1.0, 0.20)
+    weights_map = {'Residual Momentum': w_rm, 'Fundamental Momentum': w_fm, 'Value': w_val, 'Quality': w_qual}
+
 
     st.sidebar.header("3. Construção de Portfólio (Risco)")
     top_n = st.sidebar.number_input("Número de Ativos (Top N)", 1, 20, 5)
@@ -580,18 +674,20 @@ def main():
 
         with st.status("Executando Pipeline Quant...", expanded=True) as status:
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=365 * (dca_years + 1)) 
+            # Garante que há histórico suficiente para o backtest dinâmico (1 ano) + DCA (dca_years) + buffer
+            start_date = end_date - timedelta(days=365 * (dca_years + 1) + 400) 
             
-            prices = fetch_price_data(all_tickers, start_date, end_date)
+            prices = fetch_price_data(all_tickers, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
             # A busca de fundamentos agora aplica a classificação setorial refinada
             fundamentals = fetch_fundamentals(all_tickers) 
             
             if prices.empty or fundamentals.empty:
-                st.error("Dados insuficientes.")
+                st.error("Dados insuficientes. Verifique os tickers ou o período de tempo.")
                 status.update(label="Erro!", state="error")
                 return
             
             # --- CÁLCULO ATUAL (Para Tab 1) ---
+            # Usa a data final do histórico como a data de avaliação
             res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals)
             val_score = compute_value_score(fundamentals)
@@ -609,7 +705,6 @@ def main():
             norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
             cols_show = []
             
-            weights_map = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             weights_keys = {}
 
             # Normalização (usa todos os ativos para o Z-Score Setorial com as novas classes)
@@ -618,7 +713,7 @@ def main():
                     if c in df_master.columns:
                         new_col = f"{c}_Z_Sector"
                         df_master[new_col] = df_master.groupby('Sector')[c].transform(
-                            lambda x: robust_zscore(x) if len(x) > 1 else x - x.median()
+                            lambda x: robust_zscore(x)
                         )
                         weights_keys[new_col] = weights_map.get(c, 0.0)
                         cols_show.append(new_col)
@@ -630,6 +725,9 @@ def main():
                         weights_keys[new_col] = weights_map.get(c, 0.0)
                         cols_show.append(new_col)
             
+            # Remove NaNs resultantes de Z-Score com grupo de 0-1 elemento
+            df_master.dropna(subset=weights_keys.keys(), how='all', inplace=True)
+            
             final_df = build_composite_score(df_master, weights_keys)
             
             # Filtrar para apenas os tickers negociáveis (os que o usuário digitou)
@@ -639,6 +737,9 @@ def main():
             weights = construct_portfolio(final_df_trade, prices, top_n, target_vol)
             
             # --- BACKTEST DINÂMICO 1 ANO (Para Tab 2) ---
+            # Define o ponto de corte do backtest DCA
+            dca_start_date = end_date - timedelta(days=365 * dca_years)
+            
             backtest_1yr = run_rolling_1yr_backtest(
                 prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality,
                 tickers_trade=tickers
@@ -648,7 +749,7 @@ def main():
             dca_curve, dca_transactions = run_dca_backtest(
                 prices, fundamentals, weights_map, top_n, dca_amount,
                 use_vol_target, use_sector_neutrality, 
-                end_date - timedelta(days=365 * dca_years), end_date,
+                dca_start_date, end_date,
                 tickers_trade=tickers
             )
 
@@ -664,10 +765,10 @@ def main():
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("Top Picks (Score Atual)")
-                st.markdown(f"**Observação:** O Z-Score (ex: `Value_Z_Sector`) foi calculado contra um universo de {len(all_tickers) - 1} ativos com setores mais refinados.")
+                st.markdown(f"**Observação:** O Z-Score (ex: `Value_Z_Sector`) foi calculado contra um universo de **{len(all_tickers) - 1}** ativos com setores mais refinados.")
                 
                 # Exibe apenas os tickers negociáveis
-                show_list = ['Composite_Score', 'Sector'] + cols_show
+                show_list = ['Composite_Score', 'Sector'] + [c for c in cols_show if c in final_df_trade.columns]
                 st.dataframe(
                     final_df_trade[show_list].head(top_n).style.background_gradient(cmap='RdYlGn', subset=['Composite_Score']),
                     height=400, width=1000
@@ -688,7 +789,8 @@ def main():
                 total_ret = backtest_1yr.iloc[-1] - 1
                 daily = backtest_1yr.pct_change().dropna()
                 vol = daily.std() * (252**0.5)
-                sharpe = (total_ret - 0.10) / vol # Assume RF 10%
+                # Assume RF 10% (Taxa Selic/CDB ~ atual)
+                sharpe = (total_ret - 0.10) / vol 
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Retorno Estratégia", f"{total_ret['Strategy']:.2%}", delta=f"vs Benchmark {total_ret['BOVA11.SA']:.2%}")
@@ -697,7 +799,7 @@ def main():
                 
                 st.plotly_chart(px.line(backtest_1yr, title="Curva de Retorno (Base 1.0)", color_discrete_map={'Strategy': '#00CC96', 'BOVA11.SA': '#EF553B'}), use_container_width=True)
             else:
-                st.warning("Dados insuficientes para backtest dinâmico.")
+                st.warning("Dados insuficientes para backtest dinâmico. Verifique a disponibilidade histórica dos seus tickers de trade ou aumente o período de DCA.")
 
         with tab3:
             st.subheader(f"Evolução Patrimonial (DCA R${dca_amount})")
@@ -714,21 +816,22 @@ def main():
                 st.plotly_chart(px.line(dca_curve, title="Evolução Patrimonial"), use_container_width=True)
                 
                 st.subheader("Histórico de Transações")
-                dca_transactions['Date'] = pd.to_datetime(dca_transactions['Date']).dt.strftime('%Y-%m-%d')
-                dca_transactions['Price'] = dca_transactions['Price'].map('R${:,.2f}'.format)
-                dca_transactions['Value_R$'] = dca_transactions['Value_R$'].map('R${:,.2f}'.format)
-                dca_transactions['Quantity'] = dca_transactions['Quantity'].map('{:,.4f}'.format)
-                st.dataframe(dca_transactions.set_index('Date'), height=300)
+                if not dca_transactions.empty:
+                    dca_transactions['Date'] = pd.to_datetime(dca_transactions['Date']).dt.strftime('%Y-%m-%d')
+                    dca_transactions['Price'] = dca_transactions['Price'].map('R${:,.2f}'.format)
+                    dca_transactions['Value_R$'] = dca_transactions['Value_R$'].map('R${:,.2f}'.format)
+                    dca_transactions['Quantity'] = dca_transactions['Quantity'].map('{:,.4f}'.format)
+                    st.dataframe(dca_transactions.set_index('Date'), height=300)
             else:
                 st.warning("Dados insuficientes para DCA.")
 
         with tab4:
-            st.subheader("Correlação e Dados")
+            st.subheader("Correlação dos Fatores Normalizados")
             if cols_show:
-                corr = final_df[cols_show].corr()
+                corr = final_df[[c for c in cols_show if c in final_df.columns]].corr()
                 st.plotly_chart(px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r'), use_container_width=True)
             
-            st.subheader("Fundamentos (Universo Completo)")
+            st.subheader("Fundamentos e Setores (Universo Completo)")
             st.dataframe(fundamentals)
 
 if __name__ == "__main__":
