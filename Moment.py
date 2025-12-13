@@ -52,42 +52,57 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
     data = []
     clean_tickers = [t for t in tickers if t != 'BOVA11.SA']
     
-    # --- Mapeamento de Setores (CORREÇÃO DE NOMENCLATURA) ---
-    # O YFinance usa categorias amplas. Aqui, refinamos para subgrupos mais homogêneos.
+    # --- Mapeamento de Setores (CORREÇÃO DE NOMENCLATURA REALISTA) ---
     def get_refined_sector(info, ticker):
         sector = info.get('sector', 'Unknown')
-        long_name = info.get('longName', '')
+        long_name = info.get('longName', '').upper()
+        ticker_base = ticker.split('.')[0]
         
-        # Utilities
+        # --- 1. ENERGY (Oil & Gas e Renováveis) ---
+        if sector == 'Energy' or ticker_base in ['PRIO3', 'PETR4', 'PETR3', 'ENAT3']:
+            if 'RENOVÁVEIS' in long_name or 'RENEWABLE' in long_name:
+                return 'Energy - Renewables'
+            return 'Energy - Oil & Gas' # Inclui PRIO3
+        
+        # --- 2. UTILITIES ---
         if sector == 'Utilities':
-             if 'Transmissão' in long_name or 'TAEE' in ticker:
-                 return 'Utilities - Transmission'
-             return 'Utilities - Generation/Others'
-
-        # Financial Services
+            # 2a. Sanitation (SBSP3, SAPR4, CSMG3)
+            if 'SANEAMENTO' in long_name or ticker_base in ['SBSP3', 'SAPR4', 'CSMG3']:
+                 return 'Utilities - Sanitation'
+            # 2b. Electric Transmission (TAEE3)
+            elif 'TRANSMISSÃO' in long_name or ticker_base in ['TAEE3']:
+                 return 'Utilities - Electric Transmission'
+            # 2c. Electric Generation/Distribution
+            else:
+                 return 'Utilities - Electric Generation/Distribution'
+        
+        # --- 3. FINANCIAL SERVICES ---
         if sector == 'Financial Services':
-            if 'Banco' in long_name or 'ITUB' in ticker or 'BBAS' in ticker:
+            if 'BANCO' in long_name or ticker_base in ['ITUB3', 'BBAS3', 'BBDC4', 'SANB11']:
                 return 'Financial Services - Banking'
-            if 'Seguros' in long_name or 'Seguradora' in long_name or 'BBSE' in ticker or 'PSSA' in ticker:
+            if 'SEGUROS' in long_name or 'PREVIDÊNCIA' in long_name or ticker_base in ['BBSE3', 'PSSA3']:
                 return 'Financial Services - Insurance'
-            if 'Bolsa' in long_name or 'B3' in ticker:
+            if 'BOLSA' in long_name or 'CORRETORA' in long_name or ticker_base in ['B3SA3', 'BPAC11']:
                 return 'Financial Services - Capital Markets'
             return 'Financial Services - Others'
         
-        # Real Estate
-        if sector == 'Real Estate':
-            return 'Real Estate'
+        # --- 4. TECHNOLOGY/SOFTWARE ---
+        if sector == 'Technology':
+            return 'Technology - Software/IT' # Inclui TOTS3
         
-        # Industrial
+        # --- 5. CONSUMER CYCLICAL ---
+        if sector == 'Consumer Cyclical':
+            if 'VAREJO' in long_name or ticker_base in ['MGLU3', 'LREN3', 'RENT3']:
+                 return 'Consumer Cyclical - Retail/E-commerce'
+            return 'Consumer Cyclical - Others' # Ex: Construção, Turismo
+        
+        # --- 6. INDUSTRIAL/CAPITAL GOODS ---
         if sector == 'Industrials':
-            if 'Transporte' in long_name or 'Logística' in long_name:
-                return 'Industrials - Logistics'
-            return 'Industrials - Mfg/Capital Goods'
+            if 'LOGÍSTICA' in long_name or 'TRANSPORTE' in long_name or ticker_base in ['RAIL3']:
+                return 'Industrials - Logistics/Transport'
+            return 'Industrials - Mfg/Capital Goods' # Inclui WEGE3, FRAS3
             
-        # Telecom Services
-        if sector == 'Communication Services':
-            return 'Telecom'
-        
+        # --- 7. OTHERS ---
         return sector # Retorna o setor original se não houver mapeamento
 
     
@@ -511,12 +526,27 @@ def main():
     ticker_input = st.sidebar.text_area("Tickers (Separados por vírgula)", default_univ, height=100)
     tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
     
-    # NOVOS TICKERS DE REFERÊNCIA HARDCODED PARA MELHOR NEUTRALIDADE SETORIAL
+    # NOVOS TICKERS DE REFERÊNCIA EXPANDIDOS E CORRIGIDOS
     reference_tickers = [
-        'ELET3.SA', 'AURE3.SA', 'ENBR3.SA', 'CPFE3.SA', 'EQTL3.SA', # Energia
-        'CSMG3.SA', # Saneamento
-        'SANB11.SA', 'BBDC4.SA', # Outros Financeiros
-        'RENT3.SA', 'LREN3.SA', 'MGLU3.SA' # Varejo/Tecnologia
+        # Energy (Oil & Gas + Electric)
+        'PETR4.SA', 'PETR3.SA', 'ENAT3.SA', 'RRRP3.SA', # Oil & Gas peers
+        'ELET3.SA', 'AURE3.SA', 'ENBR3.SA', 'CPFE3.SA', 'EQTL3.SA', 'CMIG4.SA', 'TRPL4.SA', # Utilities peers (Electric)
+        
+        # Utilities (Sanitation)
+        'CSMG3.SA', # Sanitation peer
+        
+        # Financial Services (Banking + Insurance + Capital Markets)
+        'SANB11.SA', 'BBDC4.SA', 'CIEL3.SA', 'BPAN4.SA', 'AZUL4.SA', # Other Financials/Transport
+        'AMER3.SA', 'CVCB3.SA', # Retail/Tourism
+        
+        # Consumer/Retail/Tech
+        'RENT3.SA', 'LREN3.SA', 'MGLU3.SA', 'ASAI3.SA', 'PCAR3.SA', # Retail/Tech/Food
+        
+        # Industrials/Capital Goods
+        'EMBR3.SA', 'RAIL3.SA', 'RUMO3.SA', 'TUPY3.SA', # Industry/Transport
+        
+        # Basic Materials
+        'VALE3.SA', 'CSNA3.SA', 'GGBR4.SA' # Metals & Mining
     ]
     # Cria a lista de todos os tickers para busca (original + referência), sem duplicatas
     all_tickers = list(set(tickers + reference_tickers))
@@ -552,9 +582,8 @@ def main():
             end_date = datetime.now()
             start_date = end_date - timedelta(days=365 * (dca_years + 1)) 
             
-            # MUDANÇA: Usar 'all_tickers' para busca de dados
             prices = fetch_price_data(all_tickers, start_date, end_date)
-            # MUDANÇA CRÍTICA: 'fetch_fundamentals' agora mapeia os setores
+            # A busca de fundamentos agora aplica a classificação setorial refinada
             fundamentals = fetch_fundamentals(all_tickers) 
             
             if prices.empty or fundamentals.empty:
@@ -563,13 +592,11 @@ def main():
                 return
             
             # --- CÁLCULO ATUAL (Para Tab 1) ---
-            # Usa 'prices' e 'fundamentals' que contêm todos os ativos (trade + ref)
             res_mom = compute_residual_momentum(prices)
             fund_mom = compute_fundamental_momentum(fundamentals)
             val_score = compute_value_score(fundamentals)
             qual_score = compute_quality_score(fundamentals)
 
-            # MUDANÇA: Criar df_master com todos os tickers
             df_master = pd.DataFrame(index=all_tickers)
             df_master['Res_Mom'] = res_mom
             df_master['Fund_Mom'] = fund_mom
@@ -582,7 +609,6 @@ def main():
             norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
             cols_show = []
             
-            # Mapeamento para evitar NameError com eval
             weights_map = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             weights_keys = {}
 
@@ -606,7 +632,7 @@ def main():
             
             final_df = build_composite_score(df_master, weights_keys)
             
-            # MUDANÇA CRÍTICA: Filtrar para apenas os tickers negociáveis antes do Top N
+            # Filtrar para apenas os tickers negociáveis (os que o usuário digitou)
             final_df_trade = final_df[final_df.index.isin(tickers)]
             
             # Usar ranking filtrado para pesos e Top N
@@ -615,7 +641,7 @@ def main():
             # --- BACKTEST DINÂMICO 1 ANO (Para Tab 2) ---
             backtest_1yr = run_rolling_1yr_backtest(
                 prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality,
-                tickers_trade=tickers # NOVO PARÂMETRO
+                tickers_trade=tickers
             )
 
             # --- BACKTEST DCA (Para Tab 3) ---
@@ -623,7 +649,7 @@ def main():
                 prices, fundamentals, weights_map, top_n, dca_amount,
                 use_vol_target, use_sector_neutrality, 
                 end_date - timedelta(days=365 * dca_years), end_date,
-                tickers_trade=tickers # NOVO PARÂMETRO
+                tickers_trade=tickers
             )
 
             status.update(label="Concluído!", state="complete", expanded=False)
@@ -638,6 +664,8 @@ def main():
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("Top Picks (Score Atual)")
+                st.markdown(f"**Observação:** O Z-Score (ex: `Value_Z_Sector`) foi calculado contra um universo de {len(all_tickers) - 1} ativos com setores mais refinados.")
+                
                 # Exibe apenas os tickers negociáveis
                 show_list = ['Composite_Score', 'Sector'] + cols_show
                 st.dataframe(
