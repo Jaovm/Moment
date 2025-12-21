@@ -198,12 +198,10 @@ def run_dynamic_backtest(
     start_date_backtest: datetime
 ):
     """
-    Executa um backtest mês a mês (Walk-Forward) a partir de uma data inicial definida.
-    Substitui a função fixa de 1 ano para permitir flexibilidade de tempo.
+    Executa um backtest mês a mês (Walk-Forward).
     """
     end_date = all_prices.index[-1]
     
-    # Pega um buffer histórico para cálculo de momentum ANTES da data de início
     subset_prices = all_prices.loc[start_date_backtest - timedelta(days=400):end_date]
     rebalance_dates = subset_prices.loc[start_date_backtest:end_date].resample('MS').first().index.tolist()
     
@@ -216,20 +214,15 @@ def run_dynamic_backtest(
     for i, rebal_date in enumerate(rebalance_dates):
         next_date = rebalance_dates[i+1] if i < len(rebalance_dates) - 1 else end_date
         
-        # 1. Dados até a data de rebalanceamento (Simula o passado)
         prices_historical = subset_prices.loc[:rebal_date]
-        
-        # 2. Recalcula Momentum
         mom_window = prices_historical.tail(400) 
         risk_window = prices_historical.tail(90)
         res_mom = compute_residual_momentum(mom_window)
         
-        # 3. Scores
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
         
-        # 4. DataFrame do Mês
         df_period = pd.DataFrame(index=all_prices.columns.drop('BOVA11.SA', errors='ignore'))
         df_period['Res_Mom'] = res_mom
         df_period['Fund_Mom'] = fund_mom
@@ -241,7 +234,6 @@ def run_dynamic_backtest(
         
         df_period.dropna(thresh=2, inplace=True)
         
-        # 5. Normalização (Sector Neutral ou Global)
         norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
         w_keys = {}
         
@@ -262,7 +254,6 @@ def run_dynamic_backtest(
                     
         ranked_period = build_composite_score(df_period, w_keys)
         
-        # 6. Portfólio do Mês
         current_weights = construct_portfolio(
             ranked_period, 
             risk_window, 
@@ -270,7 +261,6 @@ def run_dynamic_backtest(
             0.15 if use_vol_target else None
         )
         
-        # 7. Retornos no próximo mês
         market_period = subset_prices.loc[rebal_date:next_date].iloc[1:] 
         period_pct = market_period.pct_change().dropna()
         
@@ -295,11 +285,9 @@ def run_dynamic_backtest(
         full_strategy = pd.concat(strategy_daily_rets)
         full_benchmark = pd.concat(benchmark_daily_rets)
         
-        # Remove duplicatas
         full_strategy = full_strategy[~full_strategy.index.duplicated(keep='first')]
         full_benchmark = full_benchmark[~full_benchmark.index.duplicated(keep='first')]
         
-        # Curva de Equity (Base 1.0)
         cumulative = pd.DataFrame({
             'Strategy': (1 + full_strategy).cumprod(),
             'BOVA11.SA': (1 + full_benchmark).cumprod()
@@ -331,7 +319,7 @@ def run_dca_backtest(
 
     portfolio_value = pd.Series(0.0, index=all_prices.index)
     benchmark_value = pd.Series(0.0, index=all_prices.index)
-    portfolio_holdings = {} # Estratégia apenas
+    portfolio_holdings = {} 
     benchmark_holdings = {'BOVA11.SA': 0.0}
     monthly_transactions = []
     
@@ -349,7 +337,6 @@ def run_dca_backtest(
         else:
             res_mom = pd.Series(dtype=float)
         
-        # Fundamentos estáticos
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
@@ -448,7 +435,6 @@ def run_dca_backtest(
         'BOVA11.SA_DCA': benchmark_value
     })
     
-    # Prepara a carteira final para visualização
     final_holdings = {k: v for k, v in portfolio_holdings.items() if v > 0}
     
     return equity_curve, pd.DataFrame(monthly_transactions), final_holdings
@@ -498,9 +484,7 @@ def main():
             end_date = datetime.now()
             start_date_total = end_date - timedelta(days=365 * (dca_years + 1)) 
             
-            # Data de corte para o backtest de 1 ano
             start_date_1yr = end_date - timedelta(days=365)
-            # Data de corte para o backtest completo (DCA period)
             start_date_dca_period = end_date - timedelta(days=365 * dca_years)
 
             prices = fetch_price_data(tickers, start_date_total, end_date)
@@ -529,7 +513,6 @@ def main():
             norm_cols = ['Res_Mom', 'Fund_Mom', 'Value', 'Quality']
             cols_show = []
             
-            # Mapeamento para evitar NameError com eval
             weights_map = {'Res_Mom': w_rm, 'Fund_Mom': w_fm, 'Value': w_val, 'Quality': w_qual}
             weights_keys = {}
 
@@ -565,7 +548,7 @@ def main():
                 start_date_backtest=start_date_dca_period
             )
 
-            # --- BACKTEST DCA (Para Tab 3 - Curve & Alloc) ---
+            # --- BACKTEST DCA (Para Tab 3 e 4 - Curve & Alloc) ---
             dca_curve, dca_transactions, dca_holdings = run_dca_backtest(
                 prices, fundamentals, weights_map, top_n, dca_amount,
                 use_vol_target, use_sector_neutrality, 
@@ -574,10 +557,13 @@ def main():
 
             status.update(label="Concluído!", state="complete", expanded=False)
 
-        # --- OUTPUTS ---
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "🏆 Ranking Atual", "📈 Performance Dinâmica (1 Ano)", 
-            "💰 Backtest DCA", "🔍 Detalhes"
+        # --- OUTPUTS (Abas atualizadas) ---
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "🏆 Ranking Atual", 
+            "📈 Performance Dinâmica (1 Ano)", 
+            "💰 Backtest DCA", 
+            "💼 Alocação Final (DCA)", # Nova Aba
+            "🔍 Detalhes"
         ])
         
         with tab1:
@@ -590,22 +576,21 @@ def main():
                     height=400, width=1000
                 )
             with col2:
-                st.subheader("Alocação Sugerida")
+                st.subheader("Sugestão de Rebalanceamento")
                 if not weights.empty:
                     w_df = weights.to_frame(name="Peso")
                     w_df["Peso"] = w_df["Peso"].map("{:.2%}".format)
                     st.table(w_df)
-                    fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição")
+                    fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição Teórica")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
         with tab2:
-            st.subheader("Performance Dinâmica (Últimos 12 Meses - Walk Forward)")
+            st.subheader("Performance Dinâmica (Últimos 12 Meses)")
             if not backtest_1yr.empty:
-                # Métricas
                 total_ret = backtest_1yr.iloc[-1] - 1
                 daily = backtest_1yr.pct_change().dropna()
                 vol = daily.std() * (252**0.5)
-                sharpe = (total_ret - 0.10) / vol # Assume RF 10%
+                sharpe = (total_ret - 0.10) / vol 
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Retorno Estratégia", f"{total_ret['Strategy']:.2%}", delta=f"vs Benchmark {total_ret['BOVA11.SA']:.2%}")
@@ -619,86 +604,110 @@ def main():
         with tab3:
             st.header(f"Simulação de Aportes ({dca_years} Anos)")
             
-            # --- Seção 1: Métricas de Performance da Estratégia (Time-Weighted) ---
-            st.subheader("Performance da Estratégia (Time-Weighted Return)")
+            # 1. Performance Dinâmica do Período DCA
+            st.subheader("Métricas de Risco/Retorno (Período Completo)")
             if not backtest_full_period.empty:
                 total_ret_full = backtest_full_period.iloc[-1] - 1
                 daily_full = backtest_full_period.pct_change().dropna()
                 vol_full = daily_full.std() * (252**0.5)
-                sharpe_full = (total_ret_full - 0.10 * dca_years) / vol_full # Ajuste simplificado RF
+                sharpe_full = (total_ret_full - 0.10 * dca_years) / vol_full 
                 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Retorno Acumulado (Período)", f"{total_ret_full['Strategy']:.2%}", delta=f"vs Bench {total_ret_full['BOVA11.SA']:.2%}")
+                m1.metric("Retorno Acumulado", f"{total_ret_full['Strategy']:.2%}", delta=f"vs Bench {total_ret_full['BOVA11.SA']:.2%}")
                 m2.metric("Volatilidade Anualizada", f"{vol_full['Strategy']:.2%}")
-                m3.metric("Sharpe Ratio (Período)", f"{sharpe_full['Strategy']:.2f}")
+                m3.metric("Sharpe Ratio", f"{sharpe_full['Strategy']:.2f}")
             else:
                 st.warning("Não foi possível calcular métricas dinâmicas para o período.")
                 
             st.markdown("---")
             
-            # --- Seção 2: Evolução Patrimonial (Money-Weighted) ---
+            # 2. Evolução Patrimonial
             st.subheader(f"Evolução Patrimonial (DCA R${dca_amount}/mês)")
             if not dca_curve.empty:
-                col_chart, col_alloc = st.columns([2, 1])
+                final_strat = dca_curve['Strategy_DCA'].iloc[-1]
+                final_bench = dca_curve['BOVA11.SA_DCA'].iloc[-1]
+                invested = len(dca_transactions['Date'].unique()) * dca_amount
                 
-                with col_chart:
-                    final_strat = dca_curve['Strategy_DCA'].iloc[-1]
-                    final_bench = dca_curve['BOVA11.SA_DCA'].iloc[-1]
-                    invested = len(dca_transactions['Date'].unique()) * dca_amount
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Investido", f"R${invested:,.2f}")
-                    c2.metric("Saldo Estratégia", f"R${final_strat:,.2f}", delta=f"{((final_strat/invested)-1):.2%}")
-                    c3.metric("Saldo Benchmark", f"R${final_bench:,.2f}", delta=f"{((final_bench/invested)-1):.2%}")
-                    
-                    st.plotly_chart(px.line(dca_curve, title="Crescimento do Patrimônio"), use_container_width=True)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Investido", f"R${invested:,.2f}")
+                c2.metric("Saldo Estratégia", f"R${final_strat:,.2f}", delta=f"{((final_strat/invested)-1):.2%}")
+                c3.metric("Saldo Benchmark", f"R${final_bench:,.2f}", delta=f"{((final_bench/invested)-1):.2%}")
+                
+                st.plotly_chart(px.line(dca_curve, title="Crescimento do Patrimônio"), use_container_width=True)
 
-                with col_alloc:
-                    st.write("### Alocação Atual (DCA)")
-                    if dca_holdings:
-                        # Pega o preço mais recente para calcular valor financeiro
-                        last_prices = prices.iloc[-1]
-                        alloc_data = []
-                        total_val = 0
-                        for t, qtd in dca_holdings.items():
-                            if t in last_prices:
-                                val = qtd * last_prices[t]
-                                alloc_data.append({'Ticker': t, 'Value': val})
-                                total_val += val
-                        
-                        df_alloc = pd.DataFrame(alloc_data)
-                        if not df_alloc.empty:
-                            df_alloc['Weight'] = df_alloc['Value'] / total_val
-                            fig_donut = px.pie(
-                                df_alloc, 
-                                values='Value', 
-                                names='Ticker', 
-                                title="Carteira Ex-Benchmark",
-                                hole=0.4
-                            )
-                            st.plotly_chart(fig_donut, use_container_width=True)
-                            
-                            st.dataframe(
-                                df_alloc.set_index('Ticker')[['Weight']].style.format("{:.1%}"),
-                                height=200
-                            )
-                    else:
-                        st.info("Carteira vazia.")
-                
-                st.subheader("Histórico de Transações")
+                st.subheader("Histórico de Execução (Boletas)")
                 dca_transactions['Date'] = pd.to_datetime(dca_transactions['Date']).dt.strftime('%Y-%m-%d')
                 dca_transactions['Price'] = dca_transactions['Price'].map('R${:,.2f}'.format)
                 dca_transactions['Value_R$'] = dca_transactions['Value_R$'].map('R${:,.2f}'.format)
                 dca_transactions['Quantity'] = dca_transactions['Quantity'].map('{:,.4f}'.format)
-                st.dataframe(dca_transactions.set_index('Date'), height=300)
+                st.dataframe(dca_transactions.set_index('Date'), height=300, use_container_width=True)
             else:
                 st.warning("Dados insuficientes para DCA.")
 
+        # --- NOVA ABA EXCLUSIVA PARA ALOCAÇÃO ---
         with tab4:
-            st.subheader("Correlação e Dados")
+            st.header("💼 Alocação Atual da Carteira DCA")
+            st.markdown("Composição final do portfólio resultante dos aportes acumulados (Ex-Benchmark).")
+            
+            if dca_holdings:
+                # Remove BOVA11 explictamente para visualização
+                clean_holdings = {k: v for k, v in dca_holdings.items() if k != 'BOVA11.SA'}
+                
+                if clean_holdings:
+                    last_prices = prices.iloc[-1]
+                    alloc_data = []
+                    total_val = 0
+                    
+                    for t, qtd in clean_holdings.items():
+                        if t in last_prices:
+                            # Valor atualizado a mercado (Mark-to-Market)
+                            val = qtd * last_prices[t]
+                            alloc_data.append({'Ticker': t, 'Quantidade': qtd, 'Valor_Atual': val})
+                            total_val += val
+                    
+                    if total_val > 0:
+                        df_alloc = pd.DataFrame(alloc_data)
+                        df_alloc['Peso (%)'] = df_alloc['Valor_Atual'] / total_val
+                        df_alloc = df_alloc.sort_values('Peso (%)', ascending=False)
+                        
+                        col_chart, col_table = st.columns([1, 1])
+                        
+                        with col_chart:
+                            fig_donut = px.pie(
+                                df_alloc, 
+                                values='Valor_Atual', 
+                                names='Ticker', 
+                                title="Distribuição Financeira (Donut Chart)",
+                                hole=0.45
+                            )
+                            fig_donut.update_traces(textposition='inside', textinfo='percent+label')
+                            st.plotly_chart(fig_donut, use_container_width=True)
+                        
+                        with col_table:
+                            st.subheader("Detalhamento de Custódia")
+                            # Formatação para exibição
+                            df_display = df_alloc.copy()
+                            df_display['Valor_Atual'] = df_display['Valor_Atual'].map('R${:,.2f}'.format)
+                            df_display['Quantidade'] = df_display['Quantidade'].map('{:,.2f}'.format)
+                            df_display['Peso (%)'] = df_display['Peso (%)'].map('{:.2%}'.format)
+                            
+                            st.dataframe(
+                                df_display.set_index('Ticker'), 
+                                use_container_width=True,
+                                height=400
+                            )
+                    else:
+                        st.warning("Erro ao calcular valores atuais (Preços indisponíveis).")
+                else:
+                    st.info("Carteira composta 100% por Caixa ou Benchmark (Nenhum ativo da estratégia mantido).")
+            else:
+                st.info("Nenhuma posição em custódia no momento.")
+
+        with tab5:
+            st.subheader("Correlação e Dados Brutos")
             if cols_show:
                 corr = final_df[cols_show].corr()
-                st.plotly_chart(px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r'), use_container_width=True)
+                st.plotly_chart(px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', title="Correlação entre Fatores"), use_container_width=True)
             st.dataframe(fundamentals)
 
 if __name__ == "__main__":
