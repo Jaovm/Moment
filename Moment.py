@@ -512,10 +512,35 @@ def main():
             with col2:
                 st.subheader("Sugestão de Rebalanceamento")
                 if not weights.empty:
-                    # w_df já vem ordenado via construct_portfolio
+                    # Lógica de Cálculo de Quantidade baseada no Aporte (MODIFICADA)
+                    latest_prices = prices.iloc[-1] # Pega o preço mais recente
+                    
                     w_df = weights.to_frame(name="Peso")
-                    w_df["Peso"] = w_df["Peso"].map("{:.2%}".format)
-                    st.table(w_df)
+                    
+                    # 1. Pega o preço atual dos ativos selecionados
+                    w_df["Preço (R$)"] = latest_prices.reindex(w_df.index).fillna(0)
+                    
+                    # 2. Calcula quanto dinheiro (R$) vai para cada ativo
+                    w_df["Alocação (R$)"] = w_df["Peso"] * dca_amount
+                    
+                    # 3. Calcula quantidade (arredondando para baixo para não ultrapassar o valor)
+                    w_df["Qtd. Aprox"] = np.where(
+                        w_df["Preço (R$)"] > 0, 
+                        np.floor(w_df["Alocação (R$)"] / w_df["Preço (R$)"]), 
+                        0
+                    )
+
+                    # Cria um DataFrame formatado apenas para exibição (Bonito)
+                    display_df = w_df.copy()
+                    display_df["Peso"] = display_df["Peso"].map("{:.2%}".format)
+                    display_df["Preço (R$)"] = display_df["Preço (R$)"].map("R$ {:,.2f}".format)
+                    display_df["Alocação (R$)"] = display_df["Alocação (R$)"].map("R$ {:,.2f}".format)
+                    display_df["Qtd. Aprox"] = display_df["Qtd. Aprox"].map("{:.0f}".format)
+
+                    # Exibe a tabela
+                    st.table(display_df[["Peso", "Preço (R$)", "Qtd. Aprox", "Alocação (R$)"]])
+                    
+                    # Gráfico de Pizza original
                     fig_pie = px.pie(values=weights.values, names=weights.index, title="Distribuição Teórica")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
