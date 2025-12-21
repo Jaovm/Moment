@@ -56,6 +56,7 @@ def fetch_fundamentals(tickers: list) -> pd.DataFrame:
         try:
             info = yf.Ticker(t).info
             sector = info.get('sector', 'Unknown')
+            # Fallback básico para setor se vier N/A
             if sector in ['Unknown', 'N/A'] and 'longName' in info:
                  if 'Banco' in info['longName'] or 'Financeira' in info['longName']:
                      sector = 'Financial Services'
@@ -185,7 +186,6 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
     else:
         weights = pd.Series(1.0/len(selected), index=selected)
         
-    # Ordenação solicitada: do maior peso para o menor
     return weights.sort_values(ascending=False)
 
 def run_dynamic_backtest(
@@ -512,7 +512,7 @@ def main():
             with col2:
                 st.subheader("Sugestão de Rebalanceamento")
                 if not weights.empty:
-                    # Lógica de Cálculo de Quantidade baseada no Aporte (MODIFICADA)
+                    # Lógica de Cálculo de Quantidade baseada no Aporte (MODIFICADA: Arredondamento Padrão)
                     latest_prices = prices.iloc[-1] # Pega o preço mais recente
                     
                     w_df = weights.to_frame(name="Peso")
@@ -523,10 +523,11 @@ def main():
                     # 2. Calcula quanto dinheiro (R$) vai para cada ativo
                     w_df["Alocação (R$)"] = w_df["Peso"] * dca_amount
                     
-                    # 3. Calcula quantidade (arredondando para baixo para não ultrapassar o valor)
+                    # 3. Calcula quantidade (ARREDONDAMENTO PADRÃO: >= 0.5 SOBE)
+                    # Soma 0.5 e usa floor: 0.8 + 0.5 = 1.3 -> 1.0 | 0.4 + 0.5 = 0.9 -> 0.0
                     w_df["Qtd. Aprox"] = np.where(
                         w_df["Preço (R$)"] > 0, 
-                        np.floor(w_df["Alocação (R$)"] / w_df["Preço (R$)"]), 
+                        np.floor((w_df["Alocação (R$)"] / w_df["Preço (R$)"]) + 0.5), 
                         0
                     )
 
