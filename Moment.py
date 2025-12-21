@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 # CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(
-    page_title="Quant Factor Lab",
+    page_title="Quant Factor Lab Pro",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -188,23 +188,24 @@ def construct_portfolio(ranked_df: pd.DataFrame, prices: pd.DataFrame, top_n: in
         
     return weights
 
-def run_rolling_1yr_backtest(
+def run_dynamic_backtest(
     all_prices: pd.DataFrame, 
     all_fundamentals: pd.DataFrame, 
     weights_config: dict, 
     top_n: int, 
     use_vol_target: bool,
-    use_sector_neutrality: bool
+    use_sector_neutrality: bool,
+    start_date_backtest: datetime
 ):
     """
-    Executa um backtest mês a mês (Walk-Forward) para os últimos 12 meses.
+    Executa um backtest mês a mês (Walk-Forward) a partir de uma data inicial definida.
+    Substitui a função fixa de 1 ano para permitir flexibilidade de tempo.
     """
     end_date = all_prices.index[-1]
-    start_date = end_date - timedelta(days=365)
     
-    # Pega um buffer histórico para cálculo de momentum
-    subset_prices = all_prices.loc[start_date - timedelta(days=400):end_date]
-    rebalance_dates = subset_prices.loc[start_date:end_date].resample('MS').first().index.tolist()
+    # Pega um buffer histórico para cálculo de momentum ANTES da data de início
+    subset_prices = all_prices.loc[start_date_backtest - timedelta(days=400):end_date]
+    rebalance_dates = subset_prices.loc[start_date_backtest:end_date].resample('MS').first().index.tolist()
     
     if not rebalance_dates:
         return pd.DataFrame()
@@ -223,7 +224,7 @@ def run_rolling_1yr_backtest(
         risk_window = prices_historical.tail(90)
         res_mom = compute_residual_momentum(mom_window)
         
-        # 3. Scores (Fundamentos estáticos por limitação do yfinance free)
+        # 3. Scores
         fund_mom = compute_fundamental_momentum(all_fundamentals)
         val_score = compute_value_score(all_fundamentals)
         qual_score = compute_quality_score(all_fundamentals)
@@ -326,11 +327,11 @@ def run_dca_backtest(
     dates = all_prices.loc[dca_start:end_date].resample('MS').first().index.tolist()
     
     if not dates or len(dates) < 2:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), {}
 
     portfolio_value = pd.Series(0.0, index=all_prices.index)
     benchmark_value = pd.Series(0.0, index=all_prices.index)
-    portfolio_holdings = {}
+    portfolio_holdings = {} # Estratégia apenas
     benchmark_holdings = {'BOVA11.SA': 0.0}
     monthly_transactions = []
     
@@ -446,7 +447,11 @@ def run_dca_backtest(
         'Strategy_DCA': portfolio_value, 
         'BOVA11.SA_DCA': benchmark_value
     })
-    return equity_curve, pd.DataFrame(monthly_transactions)
+    
+    # Prepara a carteira final para visualização
+    final_holdings = {k: v for k, v in portfolio_holdings.items() if v > 0}
+    
+    return equity_curve, pd.DataFrame(monthly_transactions), final_holdings
 
 # ==============================================================================
 # APP PRINCIPAL (STREAMLIT UI)
@@ -491,8 +496,14 @@ def main():
 
         with st.status("Executando Pipeline Quant...", expanded=True) as status:
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=365 * (dca_years + 1)) 
-            prices = fetch_price_data(tickers, start_date, end_date)
+            start_date_total = end_date - timedelta(days=365 * (dca_years + 1)) 
+            
+            # Data de corte para o backtest de 1 ano
+            start_date_1yr = end_date - timedelta(days=365)
+            # Data de corte para o backtest completo (DCA period)
+            start_date_dca_period = end_date - timedelta(days=365 * dca_years)
+
+            prices = fetch_price_data(tickers, start_date_total, end_date)
             fundamentals = fetch_fundamentals(tickers) 
             
             if prices.empty or fundamentals.empty:
@@ -543,15 +554,22 @@ def main():
             weights = construct_portfolio(final_df, prices, top_n, target_vol)
             
             # --- BACKTEST DINÂMICO 1 ANO (Para Tab 2) ---
-            backtest_1yr = run_rolling_1yr_backtest(
-                prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality
+            backtest_1yr = run_dynamic_backtest(
+                prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality,
+                start_date_backtest=start_date_1yr
+            )
+            
+            # --- BACKTEST DINÂMICO COMPLETO (Para Tab 3 - Metrics) ---
+            backtest_full_period = run_dynamic_backtest(
+                prices, fundamentals, weights_map, top_n, use_vol_target, use_sector_neutrality,
+                start_date_backtest=start_date_dca_period
             )
 
-            # --- BACKTEST DCA (Para Tab 3) ---
-            dca_curve, dca_transactions = run_dca_backtest(
+            # --- BACKTEST DCA (Para Tab 3 - Curve & Alloc) ---
+            dca_curve, dca_transactions, dca_holdings = run_dca_backtest(
                 prices, fundamentals, weights_map, top_n, dca_amount,
                 use_vol_target, use_sector_neutrality, 
-                end_date - timedelta(days=365 * dca_years), end_date
+                start_date_dca_period, end_date
             )
 
             status.update(label="Concluído!", state="complete", expanded=False)
@@ -599,18 +617,73 @@ def main():
                 st.warning("Dados insuficientes para backtest dinâmico.")
 
         with tab3:
-            st.subheader(f"Evolução Patrimonial (DCA R${dca_amount})")
+            st.header(f"Simulação de Aportes ({dca_years} Anos)")
+            
+            # --- Seção 1: Métricas de Performance da Estratégia (Time-Weighted) ---
+            st.subheader("Performance da Estratégia (Time-Weighted Return)")
+            if not backtest_full_period.empty:
+                total_ret_full = backtest_full_period.iloc[-1] - 1
+                daily_full = backtest_full_period.pct_change().dropna()
+                vol_full = daily_full.std() * (252**0.5)
+                sharpe_full = (total_ret_full - 0.10 * dca_years) / vol_full # Ajuste simplificado RF
+                
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Retorno Acumulado (Período)", f"{total_ret_full['Strategy']:.2%}", delta=f"vs Bench {total_ret_full['BOVA11.SA']:.2%}")
+                m2.metric("Volatilidade Anualizada", f"{vol_full['Strategy']:.2%}")
+                m3.metric("Sharpe Ratio (Período)", f"{sharpe_full['Strategy']:.2f}")
+            else:
+                st.warning("Não foi possível calcular métricas dinâmicas para o período.")
+                
+            st.markdown("---")
+            
+            # --- Seção 2: Evolução Patrimonial (Money-Weighted) ---
+            st.subheader(f"Evolução Patrimonial (DCA R${dca_amount}/mês)")
             if not dca_curve.empty:
-                final_strat = dca_curve['Strategy_DCA'].iloc[-1]
-                final_bench = dca_curve['BOVA11.SA_DCA'].iloc[-1]
-                invested = len(dca_transactions['Date'].unique()) * dca_amount
+                col_chart, col_alloc = st.columns([2, 1])
                 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Total Investido", f"R${invested:,.2f}")
-                c2.metric("Saldo Estratégia", f"R${final_strat:,.2f}", delta=f"{((final_strat/invested)-1):.2%}")
-                c3.metric("Saldo Benchmark", f"R${final_bench:,.2f}", delta=f"{((final_bench/invested)-1):.2%}")
-                
-                st.plotly_chart(px.line(dca_curve, title="Evolução Patrimonial"), use_container_width=True)
+                with col_chart:
+                    final_strat = dca_curve['Strategy_DCA'].iloc[-1]
+                    final_bench = dca_curve['BOVA11.SA_DCA'].iloc[-1]
+                    invested = len(dca_transactions['Date'].unique()) * dca_amount
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total Investido", f"R${invested:,.2f}")
+                    c2.metric("Saldo Estratégia", f"R${final_strat:,.2f}", delta=f"{((final_strat/invested)-1):.2%}")
+                    c3.metric("Saldo Benchmark", f"R${final_bench:,.2f}", delta=f"{((final_bench/invested)-1):.2%}")
+                    
+                    st.plotly_chart(px.line(dca_curve, title="Crescimento do Patrimônio"), use_container_width=True)
+
+                with col_alloc:
+                    st.write("### Alocação Atual (DCA)")
+                    if dca_holdings:
+                        # Pega o preço mais recente para calcular valor financeiro
+                        last_prices = prices.iloc[-1]
+                        alloc_data = []
+                        total_val = 0
+                        for t, qtd in dca_holdings.items():
+                            if t in last_prices:
+                                val = qtd * last_prices[t]
+                                alloc_data.append({'Ticker': t, 'Value': val})
+                                total_val += val
+                        
+                        df_alloc = pd.DataFrame(alloc_data)
+                        if not df_alloc.empty:
+                            df_alloc['Weight'] = df_alloc['Value'] / total_val
+                            fig_donut = px.pie(
+                                df_alloc, 
+                                values='Value', 
+                                names='Ticker', 
+                                title="Carteira Ex-Benchmark",
+                                hole=0.4
+                            )
+                            st.plotly_chart(fig_donut, use_container_width=True)
+                            
+                            st.dataframe(
+                                df_alloc.set_index('Ticker')[['Weight']].style.format("{:.1%}"),
+                                height=200
+                            )
+                    else:
+                        st.info("Carteira vazia.")
                 
                 st.subheader("Histórico de Transações")
                 dca_transactions['Date'] = pd.to_datetime(dca_transactions['Date']).dt.strftime('%Y-%m-%d')
